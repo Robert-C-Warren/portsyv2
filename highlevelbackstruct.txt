@@ -1,0 +1,31 @@
+1. backend/projects.go
+Handles:
+
+Scanning the user-selected root folder for valid Ableton projects
+
+Reading .als files (detect, list, check for .portsy folder)
+
+Managing and returning minimal metadata for the UI
+
+2. backend/watcher.go
+Handles:
+
+Watching for .als file saves/changes in detected project folders
+
+Triggers UI prompts when a save is detected
+
+3. backend/sync.go
+Handles:
+
+Push, Pull, Rollback logic
+
+File diffing/hashing
+
+Deciding what needs upload/download
+
+4. backend/firebase.go
+Handles:
+
+Storing and fetching project version metadata from Firebase
+
+Authenticating with Firebase, reading/writing commits, hashes, etc.
