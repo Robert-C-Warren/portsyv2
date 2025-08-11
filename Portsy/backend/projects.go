@@ -3,47 +3,78 @@ package backend
 import (
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type AbletonProject struct {
 	Name       string      `json:"name"`
 	Path       string      `json:"path"`
 	AlsFile    string      `json:"alsFile"`
-	HasPortsy  string      `json:"hasPortsy"`
-	LastCommit *CommitMeta `json:"lastCommit, omitempty"`
-}
-
-type CommitMeta struct {
-	ID        string `json:"id"`
-	Message   string `json:"message"`
-	Timestamp int64  `json:"timestamp"`
+	HasPortsy  bool        `json:"hasPortsy"`
+	LastCommit *CommitMeta `json:"lastCommit,omitempty"`
 }
 
 // Scans rootPath for subfolders containing .als files
 func ScanProjects(rootPath string) ([]AbletonProject, error) {
-	projects := []AbletonProject{}
+	var projects []AbletonProject
+
 	entries, err := os.ReadDir(rootPath)
 	if err != nil {
 		return nil, err
 	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			projectPath := filepath.Join(rootPath, entry.Name())
-			alsPath := ""
-			hasPortsy := false
 
-			// Look for .als file directly inside project folder
-			files, _ := os.ReadDir(projectPath)
-			for _, f := range files {
-				if filepath.Ext(f.Name()) == ".als" {
-					alsPath = filepath.Join(projectPath, f.Name())
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+
+		projectName := entry.Name()
+		projectPath := filepath.Join(rootPath, projectName)
+
+		files, err := os.ReadDir(projectPath)
+		if err != nil {
+			continue
+		}
+
+		var alsPath string
+		var firstALS string
+		preferred := projectName + ".als"
+
+		for _, f := range files {
+			if f.IsDir() {
+				continue
+			}
+			if strings.EqualFold(filepath.Ext(f.Name()), ".als") {
+				fp := filepath.Join(projectPath, f.Name())
+				if firstALS == "" {
+					firstALS = fp
+				}
+				// Prefer <FolderName>.als (case-insensitive)
+				if strings.EqualFold(f.Name(), preferred) {
+					alsPath = fp
+					break
 				}
 			}
-
-			// Only add if .als is present one level down
-			if alsPath != "" {
-
-			}
 		}
+		if alsPath == "" {
+			alsPath = firstALS
+		}
+		if alsPath == "" {
+			continue // No .als directly inside folder
+		}
+
+		hasPortsy := false
+		if fi, err := os.Stat(filepath.Join(projectPath, ".portsy")); err == nil && fi.IsDir() {
+			hasPortsy = true
+		}
+
+		projects = append(projects, AbletonProject{
+			Name:      projectName,
+			Path:      projectPath,
+			AlsFile:   alsPath,
+			HasPortsy: hasPortsy,
+		})
 	}
+
+	return projects, nil
 }
