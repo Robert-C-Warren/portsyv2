@@ -4,6 +4,7 @@ export namespace backend {
 	    id: string;
 	    message: string;
 	    timestamp: number;
+	    userId?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new CommitMeta(source);
@@ -14,6 +15,7 @@ export namespace backend {
 	        this.id = source["id"];
 	        this.message = source["message"];
 	        this.timestamp = source["timestamp"];
+	        this.userId = source["userId"];
 	    }
 	}
 	export class AbletonProject {

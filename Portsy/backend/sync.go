@@ -177,7 +177,8 @@ func PullProject(ctx context.Context, meta *MetaStore, r2 *R2Client, projectName
 			return nil
 		})
 	}
-
+	// After finishing downloads & optional delete:
+	_ = EnsureAbletonFolderIcon(destPath)
 	return nil
 }
 
