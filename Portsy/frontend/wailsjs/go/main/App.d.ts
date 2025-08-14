@@ -6,6 +6,8 @@ export function DiffJSON(arg1:string,arg2:string):Promise<string>;
 
 export function PendingJSON(arg1:string):Promise<string>;
 
+export function PickRoot():Promise<string>;
+
 export function Pull(arg1:string,arg2:string,arg3:string,arg4:boolean):Promise<string>;
 
 export function Push(arg1:string,arg2:string,arg3:string):Promise<string>;

@@ -10,6 +10,10 @@ export function PendingJSON(arg1) {
   return window['go']['main']['App']['PendingJSON'](arg1);
 }
 
+export function PickRoot() {
+  return window['go']['main']['App']['PickRoot']();
+}
+
 export function Pull(arg1, arg2, arg3, arg4) {
   return window['go']['main']['App']['Pull'](arg1, arg2, arg3, arg4);
 }
