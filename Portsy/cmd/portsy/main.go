@@ -212,7 +212,7 @@ func main() {
 			}
 			dst = filepath.Join(base, *projectName)
 		}
-		if err := backend.PullProject(ctx, meta, r2, *projectName, dst, *commitID, *force); err != nil {
+		if _, err := backend.PullProject(ctx, meta, r2, *projectName, dst, *commitID, *force); err != nil {
 			log.Fatal(err)
 		}
 		if ps, err := backend.BuildManifest(dst); err == nil {

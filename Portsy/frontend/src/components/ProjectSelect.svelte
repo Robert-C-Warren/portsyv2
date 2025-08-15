@@ -7,10 +7,10 @@
 
 <div class="row">
   <span class="muted">Selected Project:</span>
-  <select bind:value={selected} on:change={onChange} {disabled}>
-    <option value="" disabled selected>{projects.length ? "Select a project…" : "No projects"}</option>
+  <select class="dropdown" bind:value={selected} on:change={onChange} {disabled}>
+    <option class="dropdown" value="" disabled selected>{projects.length ? "Select a project…" : "No projects"}</option>
     {#each projects as p}
-      <option value={p.name}>{p.name}</option>
+      <option class="dropdown" value={p.name}>{p.name}</option>
     {/each}
   </select>
 </div>

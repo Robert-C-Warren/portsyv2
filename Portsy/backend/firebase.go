@@ -129,6 +129,87 @@ func (m *MetaStore) ListProjects(ctx context.Context) ([]ProjectDoc, error) {
 	return out, nil
 }
 
+// Begin a pending commit. Does NOT move project HEAD.
+func (m *MetaStore) BeginCommit(ctx context.Context, projectName string, commit CommitMeta, draft ProjectState) error {
+	commit.Status = "pending"
+	p := m.client.Collection("projects").Doc(projectName)
+
+	// Ensure project exists
+	if _, err := p.Set(ctx, map[string]interface{}{"Name": projectName}, firestore.MergeAll); err != nil {
+		return err
+	}
+
+	// Write commit as pending
+	if _, err := p.Collection("commits").Doc(commit.ID).Set(ctx, commit); err != nil {
+		return err
+	}
+
+	// Store draft state to resume if app crashes
+	if _, err := p.Collection("states").Doc(commit.ID).Set(ctx, draft); err != nil {
+		return err
+	}
+	return nil
+}
+
+// Verify all blobs exist in R2, then finalize commit + advance HEAD in on txn.
+func (m *MetaStore) FinalizeCommit(
+	ctx context.Context,
+	projectName string,
+	commit CommitMeta,
+	final ProjectState,
+	verify func(ctx context.Context, sha string) error,
+) error {
+	p := m.client.Collection("projects").Doc(projectName)
+
+	// 1) Verify every file hash exists in R2 before we touch metadata
+	for _, f := range final.Files {
+		if f.Hash == "" {
+			return fmt.Errorf("file %q has empty hash", f.Path)
+		}
+		if err := verify(ctx, f.Hash); err != nil {
+			return fmt.Errorf("blob missing for %s (%s): %w", f.Path, f.Hash, err)
+		}
+	}
+
+	// 2) Finalize inside a transaction
+	return m.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
+		commRef := p.Collection("commits").Doc(commit.ID)
+		stateRef := p.Collection("states").Doc(commit.ID)
+
+		// Write (or overwrite) final state
+		if err := tx.Set(stateRef, final); err != nil {
+			return err
+		}
+		// Flip status -> final
+		if err := tx.Set(commRef, map[string]interface{}{"Status": "final"}, firestore.MergeAll); err != nil {
+			return err
+		}
+
+		// Read project to update last5
+		doc, err := tx.Get(p)
+		if err != nil && status.Code(err) != codes.NotFound {
+			return err
+		}
+		var pd struct{ Last5 []string }
+		if doc.Exists() {
+			_ = doc.DataTo(&pd)
+		}
+		last5 := append([]string{commit.ID}, pd.Last5...)
+		if len(last5) > 5 {
+			last5 = last5[:5]
+		}
+
+		// Advance HEAD + last commit metadata
+		update := map[string]interface{}{
+			"Name":         projectName,
+			"LastCommitID": commit.ID,
+			"LastCommitAt": commit.Timestamp,
+			"Last5":        last5,
+		}
+		return tx.Set(p, update, firestore.MergeAll)
+	})
+}
+
 func (m *MetaStore) GetCommitHistory(ctx context.Context, projectName string, limit int) ([]CommitMeta, error) {
 	iter := m.client.Collection("projects").Doc(projectName).
 		Collection("commits").OrderBy("Timestamp", firestore.Desc).Limit(limit).Documents(ctx)

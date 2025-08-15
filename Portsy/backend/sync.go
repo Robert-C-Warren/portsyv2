@@ -2,23 +2,18 @@ package backend
 
 import (
 	"context"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 )
 
-// Diff old vs new; return files that changed (by hash)
-func diffChanged(old ProjectState, cur ProjectState) []FileEntry {
-	oldMap := map[string]string{}
-	for _, f := range old.Files {
-		oldMap[f.Path] = f.Hash
-	}
-	var changed []FileEntry
-	for _, f := range cur.Files {
-		if oldMap[f.Path] != f.Hash {
-			changed = append(changed, f)
-		}
-	}
-	return changed
+type PullStats struct {
+	ToDownload int
+	Downloaded int
+	Verified   int
+	Deleted    int
+	Skipped    int // Existed locally with matching hash
 }
 
 // PushProject uploads changed files to R2 and writes commit metadata+state to Firestore.
@@ -107,8 +102,12 @@ func ensureUploaded(ctx context.Context, r2 *R2Client, local, key string) error 
 // PullProject syncs the remote state into destPath.
 // If commitID == "", it pulls the latest. When allowDelete is true, files not in the
 // target state will be deleted locally.
-func PullProject(ctx context.Context, meta *MetaStore, r2 *R2Client, projectName, destPath, commitID string, allowDelete bool) error {
-	// 1) Find target state (latest or by commit)
+func PullProject(ctx context.Context, meta *MetaStore, r2 *R2Client,
+	projectName, destPath, commitID string, allowDelete bool) (*PullStats, error) {
+
+	stats := &PullStats{}
+
+	// 1) Resolve target state
 	var target *ProjectState
 	var err error
 	if commitID == "" {
@@ -117,24 +116,23 @@ func PullProject(ctx context.Context, meta *MetaStore, r2 *R2Client, projectName
 		target, _, err = meta.GetStateByCommit(ctx, projectName, commitID)
 	}
 	if err != nil {
-		return err
+		return stats, fmt.Errorf("pull: read remote state: %w", err)
 	}
 	if target == nil {
-		return nil // nothing to do
+		return stats, fmt.Errorf("pull: no remote state found for project %q (commit=%q)", projectName, commitID)
 	}
 
-	// 2) Build quick lookups
+	// 2) Quick lookup for deletes later
 	targetByPath := make(map[string]FileEntry, len(target.Files))
 	for _, f := range target.Files {
 		targetByPath[f.Path] = f
 	}
 
-	// 3) Ensure all target files exist locally (download if missing or hash differs)
+	// 3) Ensure files locally
 	for _, rf := range target.Files {
 		localPath := filepath.Join(destPath, filepath.FromSlash(rf.Path))
-		// make parent dir
 		if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
-			return err
+			return stats, fmt.Errorf("mkdir %s: %w", filepath.Dir(localPath), err)
 		}
 
 		needDownload := false
@@ -146,20 +144,36 @@ func PullProject(ctx context.Context, meta *MetaStore, r2 *R2Client, projectName
 				needDownload = true
 			}
 		}
+
 		if needDownload {
+			stats.ToDownload++
 			key := rf.R2Key
 			if key == "" {
-				key = r2.BuildKey(projectName, rf.Hash)
+				key = r2.BuildKey(projectName, rf.Hash) // must match your push scheme
 			}
+			log.Printf("pull: GET %s -> %s", key, localPath)
 			if err := r2.DownloadTo(ctx, key, localPath); err != nil {
-				return err
+				return stats, fmt.Errorf("download %s: %w", key, err)
 			}
+			stats.Downloaded++
+
+			// verify hash after download
+			sum, _, _, herr := HashFileSHA256(localPath)
+			if herr != nil {
+				return stats, fmt.Errorf("verify %s: %w", localPath, herr)
+			}
+			if sum != rf.Hash {
+				return stats, fmt.Errorf("verify %s: hash mismatch (got %s want %s)", localPath, sum, rf.Hash)
+			}
+			stats.Verified++
+		} else {
+			stats.Skipped++
 		}
 	}
 
-	// 4) Optionally delete locals that are not in target (clean)
+	// 4) Optional delete
 	if allowDelete {
-		filepath.Walk(destPath, func(p string, info os.FileInfo, walkErr error) error {
+		_ = filepath.Walk(destPath, func(p string, info os.FileInfo, walkErr error) error {
 			if walkErr != nil {
 				return nil
 			}
@@ -172,17 +186,23 @@ func PullProject(ctx context.Context, meta *MetaStore, r2 *R2Client, projectName
 			rel, _ := filepath.Rel(destPath, p)
 			rel = filepath.ToSlash(rel)
 			if _, ok := targetByPath[rel]; !ok {
-				_ = os.Remove(p) // best effort
+				if err := os.Remove(p); err == nil {
+					stats.Deleted++
+				}
 			}
 			return nil
 		})
 	}
-	// After finishing downloads & optional delete:
+
 	_ = EnsureAbletonFolderIcon(destPath)
-	return nil
+	log.Printf("pull: done. toDownload=%d downloaded=%d verified=%d skipped=%d deleted=%d",
+		stats.ToDownload, stats.Downloaded, stats.Verified, stats.Skipped, stats.Deleted)
+
+	return stats, nil
 }
 
 // Convenience for rollback to a specific commit ID (in-place restore).
 func RollbackProject(ctx context.Context, meta *MetaStore, r2 *R2Client, projectName, destPath, commitID string) error {
-	return PullProject(ctx, meta, r2, projectName, destPath, commitID, true)
+	_, err := PullProject(ctx, meta, r2, projectName, destPath, commitID, true)
+	return err
 }

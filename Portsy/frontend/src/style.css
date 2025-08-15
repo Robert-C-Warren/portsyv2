@@ -1,3 +1,19 @@
+@import url('https://fonts.googleapis.com/css2?family=Hubot+Sans:ital,wght@0,200..900;1,200..900&display=swap');
+html,
+body {
+	margin: 0;
+	padding: 0;
+	font-family: "Hubot Sans", sans-serif;
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit; /* inherit from body/html */
+}
+
+
 .shell {
 	display: flex;
 	flex-direction: column;
@@ -11,7 +27,7 @@
 	align-items: center;
 	padding: 10px 12px;
 	border-bottom: 1px solid #ffffff;
-    color: #ffffff;
+	color: #ffffff;
 }
 
 .root-input {
@@ -22,9 +38,10 @@
 }
 
 .projects-root-head {
-    display: flex;
-    flex-direction: row;
-    justify-content: center;
+	display: flex;
+	flex-direction: row;
+	justify-content: center;
+	align-items: center;
 }
 
 .projects-root-head input {
@@ -32,16 +49,16 @@
 }
 
 .scan-pend-btns {
-    display: flex;
-    flex-direction: row;
-    justify-content: center;
+	display: flex;
+	flex-direction: row;
+	justify-content: center;
 	margin: 15px;
 }
 
 .watch-auto-btns {
-    display: flex;
-    flex-direction: row;
-    justify-content: center;
+	display: flex;
+	flex-direction: row;
+	justify-content: center;
 }
 
 input[type="checkbox"].big {
@@ -62,6 +79,14 @@ input[type="checkbox"].big {
 	border: none;
 }
 
+.chs {
+	display: flex;
+	padding-top: 10px;
+	flex-direction: row;
+	justify-content: center;
+	align-items: center;
+}
+
 .tabs {
 	display: flex;
 	align-items: center;
@@ -72,11 +97,11 @@ input[type="checkbox"].big {
 }
 
 .tab {
-    flex: 1 1 0;
-    min-width: 0;
-    text-align: center;
-    padding: 6px 10px;
-    border-radius: 6px;
+	flex: 1 1 0;
+	min-width: 0;
+	text-align: center;
+	padding: 6px 10px;
+	border-radius: 6px;
 	border: none;
 	cursor: pointer;
 	font-size: 14px;

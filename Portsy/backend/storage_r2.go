@@ -41,35 +41,32 @@ func (r *R2Client) BuildKey(projectName, hash string) string {
 }
 
 func NewR2(ctx context.Context, cfg R2Config) (*R2Client, error) {
+	if cfg.Region == "" {
+		cfg.Region = "auto" // R2 requires "auto"
+	}
 	endpoint := fmt.Sprintf("https://%s.r2.cloudflarestorage.com", cfg.AccountID)
 
-	loadOpt := func(o *config.LoadOptions) error {
-		o.Region = cfg.Region
-		o.Credentials = aws.NewCredentialsCache(credentials.NewStaticCredentialsProvider(cfg.AccessKey, cfg.SecretKey, ""))
-		o.EndpointResolverWithOptions = aws.EndpointResolverWithOptionsFunc(func(service, region string, options ...interface{}) (aws.Endpoint, error) {
-			if service == s3.ServiceID {
-				return aws.Endpoint{
-					URL:               endpoint,
-					HostnameImmutable: true,
-				}, nil
-			}
-			return aws.Endpoint{}, fmt.Errorf("unknown service: %s", service)
-		})
-		return nil
-	}
-
-	awsCfg, err := config.LoadDefaultConfig(ctx, loadOpt)
+	awsCfg, err := config.LoadDefaultConfig(
+		ctx,
+		config.WithRegion(cfg.Region),
+		config.WithCredentialsProvider(
+			credentials.NewStaticCredentialsProvider(cfg.AccessKey, cfg.SecretKey, ""),
+		),
+	)
 	if err != nil {
 		return nil, err
 	}
+
+	// ✅ Use service-level options instead of global endpoint resolver
 	s3c := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
-		o.UsePathStyle = true // R2 likes path-style
+		o.BaseEndpoint = aws.String(endpoint) // <— replacement for the deprecated resolver
+		o.UsePathStyle = true                 // R2 needs path-style
 	})
 
 	return &R2Client{
 		cfg:    cfg,
 		client: s3c,
-		upldr:  manager.NewUploader(s3c),
+		upldr:  manager.NewUploader(s3c, func(u *manager.Uploader) { u.PartSize = 8 * 1024 * 1024 }),
 		dl:     manager.NewDownloader(s3c),
 	}, nil
 }

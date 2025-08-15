@@ -26,6 +26,10 @@ export function Rollback(arg1, arg2, arg3) {
   return window['go']['main']['App']['Rollback'](arg1, arg2, arg3);
 }
 
+export function RootStats(arg1) {
+  return window['go']['main']['App']['RootStats'](arg1);
+}
+
 export function ScanJSON(arg1) {
   return window['go']['main']['App']['ScanJSON'](arg1);
 }

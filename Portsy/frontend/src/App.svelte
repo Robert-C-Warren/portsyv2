@@ -6,8 +6,7 @@
 	import HeaderBar from "./components/HeaderBar.svelte";
 	import ProjectSelect from "./components/ProjectSelect.svelte";
 	import PushPanel from "./components/PushPanel.svelte";
-	import DiffPanel from "./components/DiffPanel.svelte";
-	import LogPane from "./components/LogPane.svelte";
+	import DiffSummary from "./components/DiffSummary.svelte";
 
 	import { ScanJSON, PendingJSON, DiffJSON, Push, StartWatcherAll, StopWatcherAll } from "../wailsjs/go/main/App.js";
 	import { EventsOn } from "../wailsjs/runtime/runtime.js";
@@ -26,6 +25,7 @@
 	let log = "";
 	let projects = [];
 	let pending = [];
+	let pushing = false;
 	let selectedProject = ""; // chosen by user from dropdown
 	let diff = [];
 	let watching = false;
@@ -174,7 +174,7 @@
 			<ProjectSelect {projects} bind:selected={selectedProject} onChange={loadDiff} disabled={!root || projects.length === 0} />
 
 			{#if currentTab === "push"}
-				<PushPanel bind:commitMsg onPush={doPush} {pending} {canPush} />
+				<PushPanel bind:commitMsg {canPush} {pending} {pushing} on:push={(e) => doPush(e.detail.message)} />
 			{/if}
 
 			{#if currentTab === "projects"}
@@ -197,9 +197,11 @@
 		<!-- RIGHT: diff + log -->
 		<div class="panel">
 			{#if currentTab === "push" || currentTab === "projects"}
-				<DiffPanel {diff} onRefresh={loadDiff} disabled={!root || !selectedProject} {selectedProject} />
+				<DiffSummary projectName={selectedProject} {diff} onRefresh={loadDiff} disabled={!root || !selectedProject} />
 			{/if}
-			<LogPane {log} />
+			<hr />
+			<div class="muted">Event log</div>
+			<pre>{log}</pre>
 		</div>
 	</div>
 </div>

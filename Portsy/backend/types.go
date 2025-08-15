@@ -23,11 +23,14 @@ type CommitMeta struct {
 	Message   string `json:"message"`
 	Timestamp int64  `json:"timestamp"`
 	UserID    string `json:"userId,omitempty"`
+	ParentID  string `json:"parentId,omitempty"`
+	Status    string `json:"status,omitempty"` // "pending" | "final"
 }
 
 // Firestore document we keep as "latest" pointer
 type ProjectDoc struct {
-	Name         string `json:"name"`
-	LastCommitID string `json:"lastCommitId,omitempty"`
-	LastCommitAt int64  `json:"lastCommitAt,omitempty"`
+	Name         string   `json:"name"`
+	LastCommitID string   `json:"lastCommitId,omitempty"`
+	LastCommitAt int64    `json:"lastCommitAt,omitempty"`
+	Last5        []string `json:"last5,omitempty"`
 }

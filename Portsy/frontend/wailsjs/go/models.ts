@@ -5,6 +5,8 @@ export namespace backend {
 	    message: string;
 	    timestamp: number;
 	    userId?: string;
+	    parentId?: string;
+	    status?: string;
 	
 	    static createFrom(source: any = {}) {
 	        return new CommitMeta(source);
@@ -16,6 +18,8 @@ export namespace backend {
 	        this.message = source["message"];
 	        this.timestamp = source["timestamp"];
 	        this.userId = source["userId"];
+	        this.parentId = source["parentId"];
+	        this.status = source["status"];
 	    }
 	}
 	export class AbletonProject {
@@ -55,6 +59,25 @@ export namespace backend {
 		    }
 		    return a;
 		}
+	}
+
+}
+
+export namespace main {
+	
+	export class RootStatsResult {
+	    dirCount: number;
+	    isDriveRoot: boolean;
+	
+	    static createFrom(source: any = {}) {
+	        return new RootStatsResult(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.dirCount = source["dirCount"];
+	        this.isDriveRoot = source["isDriveRoot"];
+	    }
 	}
 
 }

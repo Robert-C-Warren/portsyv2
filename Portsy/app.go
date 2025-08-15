@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"Portsy/backend"
@@ -17,6 +18,11 @@ import (
 type App struct {
 	ctx     context.Context
 	cliPath string
+}
+
+type RootStatsResult struct {
+	DirCount    int  `json:"dirCount"`
+	IsDriveRoot bool `json:"isDriveRoot"`
 }
 
 var (
@@ -33,7 +39,9 @@ func (a *App) Startup(ctx context.Context) {
 
 	// 1) Allow override via env var
 	if p := os.Getenv("PORTSY_CLI"); p != "" {
-		a.cliPath = p
+		if abs, err := filepath.Abs(p); err == nil {
+			a.cliPath = abs
+		}
 	}
 
 	// 2) Try alongside the running Wails binary
@@ -48,16 +56,19 @@ func (a *App) Startup(ctx context.Context) {
 
 	// 3) Try current working directory (useful in `wails dev`)
 	if a.cliPath == "" {
-		try := "portsy.exe"
-		if _, err := os.Stat(try); err == nil {
-			a.cliPath = try
+		if _, err := os.Stat("portsy.exe"); err == nil {
+			if abs, err := filepath.Abs("portsy.exe"); err == nil {
+				a.cliPath = abs
+			}
 		}
 	}
 
 	// 4) Finally, PATH
 	if a.cliPath == "" {
-		if p, err := exec.LookPath("portsy.exe"); err == nil {
-			a.cliPath = p
+		if lp, err := exec.LookPath("portsy.exe"); err == nil {
+			if abs, err := filepath.Abs(lp); err == nil {
+				a.cliPath = abs
+			}
 		}
 	}
 
@@ -77,7 +88,7 @@ func (a *App) runCmd(ctx context.Context, args ...string) (string, error) {
 	}
 	runtime.EventsEmit(ctx, "log", fmt.Sprintf("CLI: %s %v", a.cliPath, args))
 
-	cmd := exec.CommandContext(ctx, a.cliPath, args...) // args slice preserves spaces in paths
+	cmd := exec.CommandContext(a.ctx, a.cliPath, args...) // args slice preserves spaces in paths
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	err := cmd.Run()
@@ -97,6 +108,24 @@ func (a *App) runCmd(ctx context.Context, args ...string) (string, error) {
 		return "", err
 	}
 	return stdout, nil
+}
+
+// RootStats returns immediate subdir count and whether the path is a drive root (e.g., "C:\").
+func (a *App) RootStats(path string) (RootStatsResult, error) {
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		return RootStatsResult{}, err
+	}
+	dirs := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			dirs++
+		}
+	}
+	p := filepath.Clean(path)
+	p = strings.ReplaceAll(p, "/", "\\")
+	isDrive := len(p) == 3 && p[1] == ':' && p[2] == '\\'
+	return RootStatsResult{DirCount: dirs, IsDriveRoot: isDrive}, nil
 }
 
 // ---- dialogs ----
