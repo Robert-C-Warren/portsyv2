@@ -11,5 +11,5 @@
     "checkJs": false
   },
   "include": ["src/**/*.js", "src/**/*.svelte"],
-  "exclude": ["node_modules"]
+  "exclude": ["node_modules", "wailsjs"]
 }

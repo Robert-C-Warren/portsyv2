@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"Portsy/backend" // <-- matches the module name you'll init below
+	"Portsy/backend" // <-- adjust if your module path differs
 
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -28,7 +28,7 @@ func mustEnv(key string) string {
 }
 
 func checkFirestore(ctx context.Context, meta *backend.MetaStore) error {
-	testProj := "portsy-selftest" // <- avoid leading "__"
+	testProj := "portsy-selftest"
 	commit := backend.CommitMeta{
 		ID:        uuid.NewString(),
 		Message:   "selftest",
@@ -79,8 +79,72 @@ func checkR2(ctx context.Context, r2 *backend.R2Client) error {
 	return nil
 }
 
+// smokePush uploads ALL files to the single R2 keyspace used everywhere,
+// then BeginCommit -> FinalizeCommit with a verify(hash->key) that matches upload.
+func smokePush(ctx context.Context, meta *backend.MetaStore, r2 *backend.R2Client, projectName, projectPath, message string) {
+	// 1) Build manifest/state
+	st, err := backend.BuildManifest(projectPath)
+	if err != nil {
+		log.Fatalf("manifest: %v", err)
+	}
+	log.Printf("manifest: %d file(s)", len(st.Files))
+
+	// 2) Upload/ensure every blob using the SAME key builder used elsewhere
+	up, skip := 0, 0
+	for i := range st.Files {
+		fe := &st.Files[i]
+		fe.R2Key = backend.BuildR2Key(projectName, fe.Path, fe.Hash)
+		abs := filepath.Join(projectPath, filepath.FromSlash(fe.Path))
+
+		ok, err := r2.Exists(ctx, fe.R2Key)
+		if err != nil {
+			log.Fatalf("head %s: %v", fe.R2Key, err)
+		}
+		if !ok {
+			log.Printf("PUT   %s", fe.R2Key)
+			if _, err := r2.UploadFile(ctx, abs, fe.R2Key); err != nil {
+				log.Fatalf("upload %s: %v", fe.R2Key, err)
+			}
+			up++
+		} else {
+			log.Printf("SKIP  %s (exists)", fe.R2Key)
+			skip++
+		}
+	}
+	log.Printf("uploaded=%d skipped=%d", up, skip)
+
+	// 3) Begin commit (pending)
+	cm := backend.CommitMeta{
+		ID:        uuid.NewString(),
+		Message:   message,
+		Timestamp: time.Now().Unix(),
+		Status:    "pending",
+	}
+	if err := meta.BeginCommit(ctx, projectName, cm, st); err != nil {
+		log.Fatalf("begin commit: %v", err)
+	}
+	log.Printf("commit %s: pending", cm.ID)
+
+	// 4) Finalize with verify(hash -> SAME key)
+	verify := func(ctx context.Context, sha string) error {
+		key := backend.BuildR2Key(projectName, "", sha)
+		ok, err := r2.Exists(ctx, key)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("missing blob %s", key)
+		}
+		return nil
+	}
+	if err := meta.FinalizeCommit(ctx, projectName, cm, st, verify); err != nil {
+		log.Fatalf("finalize: %v", err)
+	}
+	log.Printf("commit %s: FINAL ✓", cm.ID)
+}
+
 func main() {
-	// Force .env values to override any pre-set env vars:
+	// Load .env with override semantics
 	_ = godotenv.Overload(".env", "../.env", "../../.env")
 
 	cred := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
@@ -98,14 +162,13 @@ func main() {
 		ServiceAccountKey: cred,
 	}
 
-	// add flags
 	var (
-		mode        = flag.String("mode", "check", "check | scan | push | pull | rollback | watch | pending | diff")
+		mode        = flag.String("mode", "check", "check | scan | push | pull | rollback | watch | pending | diff | smoke")
 		root        = flag.String("root", "", "projects root (scan/push/watch)")
-		projectName = flag.String("project", "", "project name (push/pull/rollback/watch)")
-		msg         = flag.String("msg", "test push", "commit message (push)")
-		dest        = flag.String("dest", "", "destination directory for pull/rollback (defaults to <root>/<project>)")
-		commitID    = flag.String("commit", "", "commit ID (for rollback or pull specific commit)")
+		projectName = flag.String("project", "", "project name (push/pull/rollback/watch/smoke)")
+		msg         = flag.String("msg", "test push", "commit message (push/smoke)")
+		dest        = flag.String("dest", "", "destination for pull/rollback (defaults to <root>/<project>)")
+		commitID    = flag.String("commit", "", "commit ID (rollback or pull specific commit)")
 		force       = flag.Bool("force", false, "allow deleting local files not in target state (pull)")
 		jsonOut     = flag.Bool("json", false, "emit JSON (for scan|pending|diff)")
 	)
@@ -131,6 +194,22 @@ func main() {
 		log.Fatalf("r2 init: %v", err)
 	}
 
+	log.Printf("cfg: proj=%s r2[acct=%s bucket=%s region=%s key=%s...]",
+		metaCfg.GCPProjectID, r2Cfg.AccountID, r2Cfg.Bucket,
+		func() string {
+			if r2Cfg.Region == "" {
+				return "auto"
+			}
+			return r2Cfg.Region
+		}(),
+		func(s string) string {
+			if len(s) < 6 {
+				return "***"
+			}
+			return s[:3] + "…" + s[len(s)-3:]
+		}(r2Cfg.AccessKey),
+	)
+
 	switch *mode {
 	case "check":
 		if err := checkFirestore(ctx, meta); err != nil {
@@ -140,7 +219,15 @@ func main() {
 			log.Fatal(err)
 		}
 		log.Println("All checks passed 🎉")
-		// LIST PROJECTS (LOCAL)
+
+	case "smoke":
+		if *root == "" || *projectName == "" {
+			log.Fatal("smoke requires -root and -project")
+		}
+		projectPath := filepath.Join(*root, *projectName)
+		smokePush(ctx, meta, r2, *projectName, projectPath, *msg)
+		return
+
 	case "scan":
 		if *root == "" {
 			fmt.Println(`usage: -mode=scan -root "<path>" [-json]`)
@@ -158,12 +245,11 @@ func main() {
 		for _, p := range projs {
 			fmt.Printf("- %s (HasPortsy=%v)\n", p.Name, p.HasPortsy)
 		}
+
 	case "push":
 		if *root == "" || *projectName == "" {
 			log.Fatal("push requires -root and -project")
 		}
-
-		// define projectPath so we can build the manifest/cache later
 		projectPath := filepath.Join(*root, *projectName)
 
 		projs, err := backend.ScanProjects(*root)
@@ -186,23 +272,18 @@ func main() {
 			Message:   *msg,
 			Timestamp: time.Now().Unix(),
 		}
-
 		if err := backend.PushProject(ctx, meta, r2, *sel, cm); err != nil {
 			log.Fatal(err)
 		}
-
-		// update local cache AFTER a successful push
 		if ps, err := backend.BuildManifest(projectPath); err == nil {
 			_ = backend.WriteCacheFromState(projectPath, ps)
 		}
-
 		log.Println("Push completed ✓")
 
 	case "pull":
 		if *projectName == "" {
 			log.Fatal("pull requires -project")
 		}
-		// default dest: <root>/<project>, falls back to current dir/<project> if root is unset
 		dst := *dest
 		if dst == "" {
 			base := *root
@@ -237,23 +318,20 @@ func main() {
 			log.Fatal(err)
 		}
 		log.Printf("Rolled back %q to commit %s into %s ✓", *projectName, *commitID, dst)
+
 	case "watch":
 		rootFlag := flag.Lookup("root")
 		projectFlag := flag.Lookup("project")
 		autoPush := flag.Bool("autopush", false, "if set, push automatically after collect")
 		flag.Parse()
-
 		if rootFlag == nil || rootFlag.Value.String() == "" {
 			fmt.Println(`usage: -mode=watch -root "<path>" [-project "<name>"] [-autopush]`)
 			return
 		}
-
 		rootPath := rootFlag.Value.String()
 
-		// define the onSave handler once (works for single or multi)
 		onSave := func(evt backend.SaveEvent) {
 			fmt.Printf("[watch] %s: %s saved @ %s\n", evt.ProjectName, filepath.Base(evt.ALSPath), evt.DetectedAt.Format(time.RFC3339))
-
 			copied, err := backend.CollectNewSamples(context.Background(), evt.ProjectPath, evt.ALSPath)
 			if err != nil {
 				fmt.Printf("[collect] error: %v\n", err)
@@ -262,8 +340,6 @@ func main() {
 			} else {
 				fmt.Printf("[collect] no new samples to copy\n")
 			}
-
-			// Ask to push (or auto-push)
 			doPush := *autoPush
 			if !doPush {
 				fmt.Printf("Push changes to remote for \"%s\"? [y/N]: ", evt.ProjectName)
@@ -281,12 +357,7 @@ func main() {
 				return
 			}
 			msg := fmt.Sprintf("autosync: %s", time.Now().Format(time.RFC3339))
-			cmd := exec.Command(exe,
-				"-mode=push",
-				"-root", rootPath,
-				"-project", evt.ProjectName,
-				"-msg", msg,
-			)
+			cmd := exec.Command(exe, "-mode=push", "-root", rootPath, "-project", evt.ProjectName, "-msg", msg)
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
 			if err := cmd.Run(); err != nil {
@@ -295,14 +366,13 @@ func main() {
 			}
 			fmt.Printf("[push] %s success.\n", evt.ProjectName)
 		}
+
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
-
 		proj := ""
 		if projectFlag != nil {
 			proj = strings.TrimSpace(projectFlag.Value.String())
 		}
-
 		if proj == "" {
 			fmt.Printf("Watching ALL projects under %s … (Ctrl+C to stop)\n", rootPath)
 			if err := backend.WatchAllProjects(ctx, rootPath, 750*time.Millisecond, onSave); err != nil {
@@ -310,13 +380,12 @@ func main() {
 			}
 			return
 		}
-
 		projectPath := filepath.Join(rootPath, proj)
 		fmt.Printf("Watching %s … (Ctrl+C to stop)\n", projectPath)
 		if err := backend.WatchProjectALS(ctx, proj, projectPath, 750*time.Millisecond, onSave); err != nil {
 			fmt.Printf("watch error: %v\n", err)
 		}
-		// WHICH PROJECTS CHANGED SINCE LAST CACHE
+
 	case "pending":
 		if *root == "" {
 			fmt.Println(`usage: -mode=pending -root "<path>" [-json]`)
@@ -339,14 +408,12 @@ func main() {
 			fmt.Printf("- %s  (+%d ~%d -%d)  total %d\n", c.Name, c.Added, c.Modified, c.Deleted, c.Total)
 		}
 
-		// FILE-LEVEL DIFF FOR ONE PROJECT VS LOCAL CACHE
 	case "diff":
 		if *root == "" || *projectName == "" {
 			fmt.Println(`usage: -mode=diff -root "<path>" -project "<name>" [-json]`)
 			return
 		}
 		projectPath := filepath.Join(*root, *projectName)
-
 		ps, err := backend.BuildManifest(projectPath)
 		if err != nil {
 			fmt.Printf("manifest error: %v\n", err)
@@ -355,7 +422,6 @@ func main() {
 		cur := backend.ManifestFromState(ps)
 		lc, _ := backend.LoadLocalCache(projectPath)
 		changes := backend.DiffManifests(cur, lc.Manifest)
-
 		if *jsonOut {
 			_ = json.NewEncoder(os.Stdout).Encode(changes)
 			return
@@ -367,6 +433,7 @@ func main() {
 		for _, ch := range changes {
 			fmt.Printf("%-8s %s\n", ch.Type, ch.Path)
 		}
+
 	default:
 		log.Fatalf("unknown mode: %s", *mode)
 	}

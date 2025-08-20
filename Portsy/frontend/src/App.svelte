@@ -7,8 +7,9 @@
 	import ProjectSelect from "./components/ProjectSelect.svelte";
 	import PushPanel from "./components/PushPanel.svelte";
 	import DiffSummary from "./components/DiffSummary.svelte";
+	import PullPanel from './components/pull/PullPanel.svelte'
 
-	import { ScanJSON, PendingJSON, DiffJSON, Push, StartWatcherAll, StopWatcherAll } from "../wailsjs/go/main/App.js";
+	import { ScanJSON, PendingJSON, DiffJSON, Push, StartWatcherAll, StopWatcherAll, Pull } from "../wailsjs/go/main/App.js";
 	import { EventsOn } from "../wailsjs/runtime/runtime.js";
 	import { PickRoot, RootStats } from "../wailsjs/go/main/App.js";
 
@@ -175,6 +176,9 @@
 
 			{#if currentTab === "push"}
 				<PushPanel bind:commitMsg {canPush} {pending} {pushing} on:push={(e) => doPush(e.detail.message)} />
+			{/if}
+			{#if currentTab === "pull"}
+				<PullPanel />
 			{/if}
 
 			{#if currentTab === "projects"}

@@ -3,6 +3,7 @@ package backend
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"cloud.google.com/go/firestore"
 	"google.golang.org/api/iterator"
@@ -129,84 +130,96 @@ func (m *MetaStore) ListProjects(ctx context.Context) ([]ProjectDoc, error) {
 	return out, nil
 }
 
-// Begin a pending commit. Does NOT move project HEAD.
-func (m *MetaStore) BeginCommit(ctx context.Context, projectName string, commit CommitMeta, draft ProjectState) error {
+// BeginCommit writes a pending commit + its draft state.
+// Only writes; no reads, so a batch is fine.
+func (m *MetaStore) BeginCommit(ctx context.Context, projectName string, commit CommitMeta, state ProjectState) error {
 	commit.Status = "pending"
+	if commit.Timestamp == 0 {
+		commit.Timestamp = time.Now().Unix()
+	}
+
 	p := m.client.Collection("projects").Doc(projectName)
+	b := m.client.Batch()
 
-	// Ensure project exists
-	if _, err := p.Set(ctx, map[string]interface{}{"Name": projectName}, firestore.MergeAll); err != nil {
-		return err
-	}
+	// Ensure the project doc exists (merge so we don't clobber fields)
+	b.Set(p, map[string]any{"name": projectName}, firestore.MergeAll)
 
-	// Write commit as pending
-	if _, err := p.Collection("commits").Doc(commit.ID).Set(ctx, commit); err != nil {
-		return err
-	}
+	// Stash commit + state under subcollections
+	b.Set(p.Collection("commits").Doc(commit.ID), commit)
+	b.Set(p.Collection("states").Doc(commit.ID), state)
 
-	// Store draft state to resume if app crashes
-	if _, err := p.Collection("states").Doc(commit.ID).Set(ctx, draft); err != nil {
-		return err
-	}
-	return nil
+	_, err := b.Commit(ctx)
+	return err
 }
 
-// Verify all blobs exist in R2, then finalize commit + advance HEAD in on txn.
+// FinalizeCommit verifies blobs exist (outside tx), then atomically:
+// - writes the final commit + state (idempotent if already present)
+// - advances project HEAD
+// - updates Last5 as a list of commit IDs (max 5, oldest->newest)
 func (m *MetaStore) FinalizeCommit(
 	ctx context.Context,
 	projectName string,
 	commit CommitMeta,
-	final ProjectState,
-	verify func(ctx context.Context, sha string) error,
+	state ProjectState,
+	verify func(context.Context, string) error, // verify(ctx, sha256Hex)
 ) error {
-	p := m.client.Collection("projects").Doc(projectName)
-
-	// 1) Verify every file hash exists in R2 before we touch metadata
-	for _, f := range final.Files {
-		if f.Hash == "" {
-			return fmt.Errorf("file %q has empty hash", f.Path)
-		}
-		if err := verify(ctx, f.Hash); err != nil {
-			return fmt.Errorf("blob missing for %s (%s): %w", f.Path, f.Hash, err)
+	// 1) Verify every file's blob exists in R2 BEFORE touching Firestore.
+	for _, fe := range state.Files {
+		if err := verify(ctx, fe.Hash); err != nil {
+			return fmt.Errorf("verify %s: %w", fe.Hash, err)
 		}
 	}
 
-	// 2) Finalize inside a transaction
+	p := m.client.Collection("projects").Doc(projectName)
+	commits := p.Collection("commits")
+	states := p.Collection("states")
+
+	// 2) Firestore transaction: all reads first, then writes (no read after write).
 	return m.client.RunTransaction(ctx, func(ctx context.Context, tx *firestore.Transaction) error {
-		commRef := p.Collection("commits").Doc(commit.ID)
-		stateRef := p.Collection("states").Doc(commit.ID)
-
-		// Write (or overwrite) final state
-		if err := tx.Set(stateRef, final); err != nil {
+		// READ the current project doc (ok before any writes)
+		var proj ProjectDoc
+		snap, err := tx.Get(p)
+		if err != nil {
+			if status.Code(err) == codes.NotFound {
+				proj = ProjectDoc{Name: projectName}
+			} else {
+				return err
+			}
+		} else if err := snap.DataTo(&proj); err != nil {
 			return err
 		}
-		// Flip status -> final
-		if err := tx.Set(commRef, map[string]interface{}{"Status": "final"}, firestore.MergeAll); err != nil {
+
+		// Prepare the final commit
+		commit.Status = "final"
+		if commit.Timestamp == 0 {
+			commit.Timestamp = time.Now().Unix()
+		}
+
+		// WRITE (no reads after this point)
+		if err := tx.Set(commits.Doc(commit.ID), commit); err != nil {
+			return err
+		}
+		if err := tx.Set(states.Doc(commit.ID), state); err != nil {
 			return err
 		}
 
-		// Read project to update last5
-		doc, err := tx.Get(p)
-		if err != nil && status.Code(err) != codes.NotFound {
+		// Advance HEAD + roll Last5 (IDs only)
+		proj.Name = projectName
+		proj.LastCommitID = commit.ID
+		proj.LastCommitAt = commit.Timestamp
+
+		// Append the new commit ID, clamp to last 5 (oldest -> newest)
+		newLast := append(proj.Last5, commit.ID)
+		if len(newLast) > 5 {
+			newLast = newLast[len(newLast)-5:]
+		}
+		proj.Last5 = newLast
+
+		// Upsert the project doc
+		if err := tx.Set(p, proj); err != nil {
 			return err
 		}
-		var pd struct{ Last5 []string }
-		if doc.Exists() {
-			_ = doc.DataTo(&pd)
-		}
-		last5 := append([]string{commit.ID}, pd.Last5...)
-		if len(last5) > 5 {
-			last5 = last5[:5]
-		}
-
-		// Advance HEAD + last commit metadata
-		update := map[string]interface{}{
-			"Name":         projectName,
-			"LastCommitID": commit.ID,
-			"LastCommitAt": commit.Timestamp,
-			"Last5":        last5,
-		}
-		return tx.Set(p, update, firestore.MergeAll)
+		return nil
 	})
 }
 

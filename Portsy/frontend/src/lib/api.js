@@ -1,44 +1,40 @@
-import * as Main from '../../wailsjs/go/main/App'
+// Tries generated ESM first, falls back to window.go.main.App at runtime
+import * as Main from '../../wailsjs/go/main/App';
 
-// ---- PUSH ----
-export async function listPushableProjects() {
-    if (Main.listPushableProjects) return Main.listPushableProjects();
-    if (Main.ListProjectsWithLocalChanges) return Main.ListProjectsWithLocalChanges();
-    throw new Error('No ListPushableProjects/ListProjectsWithLocalChanges binding found in go/main/App');
-}
-export async function getDiffForProject(projectName) {
-    if (Main.getDiffForProject) return Main.getDiffForProject();
-    if (Main.GetDiff) return Main.GetDiff();
-    throw new Error('No GetDiffForProject/GetDiff binding found in go/main/App');
-}
-export async function pushProject(projectName, message) {
-    if (Main.PushProjectWithMessage) return Main.PushProjectWithMessage(projectName, message);
-    if (Main.PushProject) return Main.PushProject(projectName, message);
-    if (Main.Push) return Main.Push({ projectName, message });
-    throw new Error('No Push binding found in go/main/App');
-}
+const win = () => globalThis.window?.go?.main?.App || null;
+const pick = (...names) => names.map(n => Main[n] || win()?.[n]).find(fn => typeof fn === 'function');
+const call = async (name, ...args) => {
+  const fn = pick(name);
+  if (!fn) throw new Error(`Missing backend export: ${name}`);
+  return fn(...args);
+};
 
-// ---- PULL ----
-export async function listRemoteProjects() {
-    if (Main.listRemoteProjects) return Main.listRemoteProjects();
-    if (Main.ListProjects) return Main.ListProjects();
-    throw new Error('No ListRemoteProjects/ListProjects binding found in go/main/App');
-}
-export async function getPullStatus(projectName) {
-  if (Main.GetPullStatus) return Main.GetPullStatus(projectName);
-  // fallback if you don’t expose it yet
-  return { localNewer: false };
-}
-export async function getCommitHistory(projectName, limit = 5) {
-  if (Main.GetCommitHistory) return Main.GetCommitHistory(projectName, limit);
-  return [];
-}
-export async function pullProject(projectName, { allowDelete = false, commitId = '' } = {}) {
-  // Try common signatures
-  if (Main.PullProject) {
-    try { return await Main.PullProject(projectName, commitId, allowDelete); } catch {}
-    try { return await Main.PullProject({ projectName, commitId, allowDelete }); } catch {}
-  }
-  if (Main.PullHead) return Main.PullHead(projectName, allowDelete);
-  throw new Error('No PullProject/PullHead binding found in go/main/App');
+// PUSH
+export const listPushableProjects = () => call('ListPushableProjects');
+export const getDiffForProject     = (name) => call('GetDiffForProject', name);
+export const pushProject           = (name, msg) => {
+  const fn = pick('PushProjectWithMessage','PushProject','Push');
+  if (!fn) throw new Error('Push export missing');
+  try { return fn(name, msg); } catch { return fn({ projectName:name, message:msg }); }
+};
+
+// PULL
+export const listRemoteProjects    = () => call('ListRemoteProjects');
+export const getPullStatus         = (name) => (pick('GetPullStatus') ? call('GetPullStatus', name) : { localNewer:false });
+export const getCommitHistory      = (name, limit=5) => (pick('GetCommitHistory') ? call('GetCommitHistory', name, limit) : []);
+export const pullProject           = (name, { allowDelete=false, commitId='' }={}) => {
+  const fn = pick('PullProject','PullHead');
+  if (!fn) throw new Error('Pull export missing');
+  try { return fn(name, commitId, allowDelete); } catch {}
+  try { return fn({ projectName:name, commitId, allowDelete }); } catch {}
+  if (fn.name === 'PullHead') return fn(name, allowDelete);
+  throw new Error('Pull signature mismatch');
+};
+
+// (Optional) Wails runtime events
+export function onEvent(eventName, handler) {
+  try {
+    const { EventsOn } = require('../../wailsjs/runtime/runtime.js');
+    return EventsOn(eventName, handler);
+  } catch { /* ignore in dev without generator */ }
 }

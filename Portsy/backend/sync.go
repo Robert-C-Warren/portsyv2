@@ -8,14 +8,6 @@ import (
 	"path/filepath"
 )
 
-type PullStats struct {
-	ToDownload int
-	Downloaded int
-	Verified   int
-	Deleted    int
-	Skipped    int // Existed locally with matching hash
-}
-
 // PushProject uploads changed files to R2 and writes commit metadata+state to Firestore.
 // It also migrates objects when the desired R2 key changes (e.g., key layout update).
 func PushProject(ctx context.Context, meta *MetaStore, r2 *R2Client, project AbletonProject, commit CommitMeta) error {
