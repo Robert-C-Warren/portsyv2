@@ -1,5 +1,6 @@
 <script>
-	import { listRemoteProjects, getCommitHistory } from "src/lib/api";
+	import { listRemoteProjects, getCommitHistory } from "../../lib/api.js";
+	import { onMount } from "svelte";
 	let loading = true,
 		error = "",
 		projects = [],
@@ -36,11 +37,15 @@
 	{#if error}<p class="label">Error: {error}</p>{/if}
 	<ul class="list">
 		{#each projects as p}
-			<li class="item" on:click={() => pick(p.name || p.Name)}>
-				<div class="spread">
-					<strong>{p.name || p.Name}</strong>
-					{#if p.lastCommitId || p.LastCommitID}<span class="badge">HEAD: {p.lastCommitId || p.LastCommitID}</span>{/if}
-				</div>
+			<li class="item">
+				<button type="button" class="btn" on:click={() => pick(p.name || p.Name)} style="width:100%; text-align:left;">
+					<div class="spread" style="pointer-events:none;">
+						<strong>{p.name || p.Name}</strong>
+						{#if p.lastCommitId || p.LastCommitID}
+							<span class="badge">HEAD: {p.lastCommitId || p.LastCommitID}</span>
+						{/if}
+					</div>
+				</button>
 			</li>
 		{/each}
 	</ul>

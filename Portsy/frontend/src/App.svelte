@@ -2,12 +2,12 @@
 	import "./style.css";
 	import { onMount, onDestroy } from "svelte";
 
-	import Tabs from "./components/Tabs.svelte";
+	import Tabs from "./components/tabs/Tabs.svelte";
 	import HeaderBar from "./components/HeaderBar.svelte";
 	import ProjectSelect from "./components/ProjectSelect.svelte";
-	import PushPanel from "./components/PushPanel.svelte";
-	import DiffSummary from "./components/DiffSummary.svelte";
-	import PullPanel from './components/pull/PullPanel.svelte'
+	import DiffSummary from "./components/push/DiffSummary.svelte";
+	import PushPanel from "./components/push/PushPanel.svelte";
+	import PullPanel from "./components/pull/PullPanel.svelte";
 
 	import { ScanJSON, PendingJSON, DiffJSON, Push, StartWatcherAll, StopWatcherAll, Pull } from "../wailsjs/go/main/App.js";
 	import { EventsOn } from "../wailsjs/runtime/runtime.js";
@@ -137,8 +137,13 @@
 			watching = false;
 			return;
 		}
-		if (watching) await StartWatcherAll(root, true);
-		else await StopWatcherAll();
+		if (!watching) {
+			await StartWatcherAll(root, true);
+			watching = true;
+		} else {
+			await StopWatcherAll();
+			watching = false;
+		}
 	}
 
 	// Derived state
@@ -171,35 +176,31 @@
 
 	<div class="content">
 		<!-- LEFT: controls -->
-		<div class="panel">
-			<ProjectSelect {projects} bind:selected={selectedProject} onChange={loadDiff} disabled={!root || projects.length === 0} />
-
+		<div class="panel projects-panel">
 			{#if currentTab === "push"}
 				<PushPanel bind:commitMsg {canPush} {pending} {pushing} on:push={(e) => doPush(e.detail.message)} />
 			{/if}
 			{#if currentTab === "pull"}
-				<PullPanel />
+				<PullPanel {root} />
 			{/if}
 
 			{#if currentTab === "projects"}
-				<div class="muted">Projects found:</div>
+				<div class="muted projects-row">Projects found:</div>
+				<ProjectSelect {projects} bind:selected={selectedProject} onChange={loadDiff} disabled={!root || projects.length === 0} />
 				{#if !root}
-					<div class="row">Choose a root to scan.</div>
+					<div class="row projects-row">Choose a root to scan.</div>
 				{:else if projects.length === 0}
-					<div class="row">No projects found.</div>
+					<div class="row projects-row">No projects found.</div>
 				{:else}
 					{#each projects as p}
-						<div class="row">• {p.name} {p.hasPortsy ? "" : "(no .portsy)"}</div>
-						<option value={p.name}>{p.name}</option>
+						<div class="row projects-row">• {p.name} {p.hasPortsy ? "" : "(no .portsy)"}</div>
 					{/each}
 				{/if}
 			{/if}
-
-			<!-- TODO: Pull / Rollback panes -->
 		</div>
 
 		<!-- RIGHT: diff + log -->
-		<div class="panel">
+		<div class="panel diff-panel">
 			{#if currentTab === "push" || currentTab === "projects"}
 				<DiffSummary projectName={selectedProject} {diff} onRefresh={loadDiff} disabled={!root || !selectedProject} />
 			{/if}

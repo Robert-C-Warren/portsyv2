@@ -12,12 +12,14 @@ import (
 
 	"Portsy/backend"
 
+	"github.com/joho/godotenv"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 type App struct {
 	ctx     context.Context
 	cliPath string
+	meta    *backend.MetaStore
 }
 
 type RootStatsResult struct {
@@ -33,18 +35,18 @@ func NewApp() *App { return &App{} }
 
 // ---- lifecycle ----
 
-// NOTE: Must be exported (capital S) for Wails to call it.
 func (a *App) Startup(ctx context.Context) {
 	a.ctx = ctx
 
-	// 1) Allow override via env var
+	// Load .env so GUI has the same env as CLI
+	_ = godotenv.Overload(".env", "../.env", "../../.env")
+
+	// ---- locate CLI (as you had) ----
 	if p := os.Getenv("PORTSY_CLI"); p != "" {
 		if abs, err := filepath.Abs(p); err == nil {
 			a.cliPath = abs
 		}
 	}
-
-	// 2) Try alongside the running Wails binary
 	if a.cliPath == "" {
 		if exe, err := os.Executable(); err == nil {
 			try := filepath.Join(filepath.Dir(exe), "portsy.exe")
@@ -53,8 +55,6 @@ func (a *App) Startup(ctx context.Context) {
 			}
 		}
 	}
-
-	// 3) Try current working directory (useful in `wails dev`)
 	if a.cliPath == "" {
 		if _, err := os.Stat("portsy.exe"); err == nil {
 			if abs, err := filepath.Abs("portsy.exe"); err == nil {
@@ -62,8 +62,6 @@ func (a *App) Startup(ctx context.Context) {
 			}
 		}
 	}
-
-	// 4) Finally, PATH
 	if a.cliPath == "" {
 		if lp, err := exec.LookPath("portsy.exe"); err == nil {
 			if abs, err := filepath.Abs(lp); err == nil {
@@ -78,6 +76,35 @@ func (a *App) Startup(ctx context.Context) {
 	} else {
 		runtime.EventsEmit(a.ctx, "log", fmt.Sprintf("CLI resolved: %s", a.cliPath))
 	}
+
+	// ---- init Firestore MetaStore for GUI calls (ListRemoteProjects etc.) ----
+	// Needs GCP_PROJECT_ID and GOOGLE_APPLICATION_CREDENTIALS
+	proj := os.Getenv("GCP_PROJECT_ID")
+	cred := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
+	if strings.HasPrefix(cred, ".") {
+		if abs, err := filepath.Abs(cred); err == nil {
+			cred = abs
+		}
+	}
+	if proj == "" || cred == "" {
+		runtime.EventsEmit(a.ctx, "log", "Firestore not configured (set GCP_PROJECT_ID and GOOGLE_APPLICATION_CREDENTIALS). ListRemoteProjects will be unavailable.")
+		return
+	}
+	if _, err := os.Stat(cred); err != nil {
+		runtime.EventsEmit(a.ctx, "log", fmt.Sprintf("GOOGLE_APPLICATION_CREDENTIALS not found at %q: %v", cred, err))
+		return
+	}
+	metaCfg := backend.MetaStoreConfig{
+		GCPProjectID:      proj,
+		ServiceAccountKey: cred,
+	}
+	m, err := backend.NewMetaStore(ctx, metaCfg)
+	if err != nil {
+		runtime.EventsEmit(a.ctx, "log", fmt.Sprintf("Firestore init error: %v", err))
+		return
+	}
+	a.meta = m
+	runtime.EventsEmit(a.ctx, "log", "Firestore connected ✓")
 }
 
 // ---- utilities ----
@@ -225,4 +252,15 @@ func (a *App) StopWatcherAll() {
 		watchCancel = nil
 		runtime.EventsEmit(a.ctx, "log", "Watcher stopped")
 	}
+}
+
+func (a *App) ListRemoteProjects() ([]backend.ProjectDoc, error) {
+	if a.meta == nil {
+		return nil, fmt.Errorf("firestore not configured in GUI (set GCP_PROJECT_ID and GOOGLE_APPLICATION_CREDENTIALS, or check Startup logs)")
+	}
+	ctx := a.ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return a.meta.ListProjects(ctx)
 }

@@ -1,10 +1,13 @@
 @import url("https://fonts.googleapis.com/css2?family=Hubot+Sans:ital,wght@0,200..900;1,200..900&display=swap");
 :root {
-	--bg: #0f1115;
-	--fg: #e6e7eb;
-	--muted: #a0a3ab;
+	--bg: #282625;
+	--fg: #000000;
+	--muted: #fbfaf9;
 	--accent: #7c5cff;
-	--border: #23262f;
+	--border: #282625;
+	--button: #e8b430;
+	--panel: #77716e;
+	--selected-tab: #ef8354;
 }
 html,
 body {
@@ -35,6 +38,9 @@ a {
 	color: var(--accent);
 	text-decoration: none;
 }
+.shell {
+	padding: 15px;
+}
 .container {
 	max-width: 1100px;
 	margin: 0 auto;
@@ -44,7 +50,13 @@ a {
 	border: 1px solid var(--border);
 	border-radius: 10px;
 	padding: 16px;
-	background: #131620;
+	background: var(--panel);
+	margin-top: 20px;
+}
+.projects-row {
+	padding: 10px;
+	justify-content: center;
+	text-align: center;
 }
 .row {
 	display: flex;
@@ -55,13 +67,21 @@ a {
 	padding: 10px 14px;
 	border: 1px solid var(--border);
 	border-radius: 8px;
-	background: #1a1f2d;
+	background: var(--button);
 	color: var(--fg);
 	cursor: pointer;
 }
 .btn[disabled] {
 	opacity: 0.5;
 	cursor: not-allowed;
+}
+.pull-refresh {
+	display: flex;
+	justify-content: center;
+	align-items: center;
+}
+.pull-refresh-btn {
+	min-width: 150px;
 }
 .input,
 .select,
@@ -70,7 +90,7 @@ a {
 	padding: 10px 12px;
 	border: 1px solid var(--border);
 	border-radius: 8px;
-	background: #0f1320;
+	background: var(--button);
 	color: var(--fg);
 }
 .label {
@@ -92,7 +112,7 @@ a {
 	border: 1px solid var(--border);
 	border-radius: 8px;
 	margin: 6px 0;
-	background: #121625;
+	background: #FF2E63;
 }
 .badge {
 	padding: 2px 8px;
@@ -105,4 +125,11 @@ hr {
 	border: none;
 	border-top: 1px solid var(--border);
 	margin: 16px 0;
+}
+.changed-badge {
+	margin-top: 10px;
+}
+.commit-guide {
+	font-size: 12px;
+	margin-left: 5px;
 }

@@ -3,6 +3,8 @@ package backend
 import (
 	"context"
 	"fmt"
+	"sort"
+	"strings"
 	"time"
 
 	"cloud.google.com/go/firestore"
@@ -112,13 +114,15 @@ func (m *MetaStore) GetLatestState(ctx context.Context, projectName string) (*Pr
 
 func (m *MetaStore) ListProjects(ctx context.Context) ([]ProjectDoc, error) {
 	iter := m.client.Collection("projects").Documents(ctx)
+	defer iter.Stop()
+
 	var out []ProjectDoc
 	for {
 		d, err := iter.Next()
+		if err == iterator.Done {
+			break
+		}
 		if err != nil {
-			if err == iterator.Done {
-				break
-			}
 			return nil, err
 		}
 		var pd ProjectDoc
@@ -127,6 +131,9 @@ func (m *MetaStore) ListProjects(ctx context.Context) ([]ProjectDoc, error) {
 		}
 		out = append(out, pd)
 	}
+	sort.Slice(out, func(i, j int) bool {
+		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
+	})
 	return out, nil
 }
 

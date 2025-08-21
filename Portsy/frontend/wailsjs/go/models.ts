@@ -60,6 +60,25 @@ export namespace backend {
 		    return a;
 		}
 	}
+	
+	export class ProjectDoc {
+	    name: string;
+	    lastCommitId?: string;
+	    lastCommitAt?: number;
+	    last5?: string[];
+	
+	    static createFrom(source: any = {}) {
+	        return new ProjectDoc(source);
+	    }
+	
+	    constructor(source: any = {}) {
+	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.name = source["name"];
+	        this.lastCommitId = source["lastCommitId"];
+	        this.lastCommitAt = source["lastCommitAt"];
+	        this.last5 = source["last5"];
+	    }
+	}
 
 }
 

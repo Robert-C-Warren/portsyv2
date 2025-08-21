@@ -6,6 +6,10 @@ export function DiffJSON(arg1, arg2) {
   return window['go']['main']['App']['DiffJSON'](arg1, arg2);
 }
 
+export function ListRemoteProjects() {
+  return window['go']['main']['App']['ListRemoteProjects']();
+}
+
 export function PendingJSON(arg1) {
   return window['go']['main']['App']['PendingJSON'](arg1);
 }
