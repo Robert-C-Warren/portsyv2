@@ -182,18 +182,23 @@ func (a *App) ScanProjects(rootPath string) ([]backend.AbletonProject, error) {
 func (a *App) ScanJSON(root string) (string, error) {
 	return a.runCmd(a.ctx, "-mode=scan", "-root", root, "-json")
 }
+
 func (a *App) PendingJSON(root string) (string, error) {
 	return a.runCmd(a.ctx, "-mode=pending", "-root", root, "-json")
 }
-func (a *App) DiffJSON(root, project string) (string, error) {
-	return a.runCmd(a.ctx, "-mode=diff", "-root", root, "-project", project, "-json")
+
+func (a *App) DiffJSON(root string) (string, error) {
+	// Use the CLI's diff mode and return its JSON directly.
+	return a.runCmd(a.ctx, "-mode=diff", "-root", root, "-json")
 }
+
 func (a *App) Push(root, project, msg string) (string, error) {
 	if msg == "" {
 		msg = "GUI push: " + time.Now().Format(time.RFC3339)
 	}
 	return a.runCmd(a.ctx, "-mode=push", "-root", root, "-project", project, "-msg", msg)
 }
+
 func (a *App) Pull(project, dest, commit string, force bool) (string, error) {
 	args := []string{"-mode=pull", "-project", project}
 	if dest != "" {
@@ -207,6 +212,7 @@ func (a *App) Pull(project, dest, commit string, force bool) (string, error) {
 	}
 	return a.runCmd(a.ctx, args...)
 }
+
 func (a *App) Rollback(project, dest, commit string) (string, error) {
 	args := []string{"-mode=rollback", "-project", project}
 	if dest != "" {

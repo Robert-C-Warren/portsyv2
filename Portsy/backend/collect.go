@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -14,11 +15,267 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
 )
+
+type ALSLogicalDiff struct {
+	Samples struct {
+		Added   []string `json:"added"`
+		Removed []string `json:"removed"`
+		Changed []string `json:"changed"`
+	} `json:"samples"`
+	MIDI struct {
+		AddedClips   []string `json:"addedClips"`
+		RemovedClips []string `json:"removedClips"`
+		ChangedClips []string `json:"changedClips"`
+	} `json:"midi"`
+}
+
+type HashLookup func(relPath string) string
+
+// ComputeALSLogicalDiff compares PREV vs CURR ALS content and produces a logical diff.
+// - prevALS: ungzipped XML bytes of previously committed .als (pass nil if none)
+// - crrALSPath: path to CURR .als (gzipped on disk). We'll ungzip internally.
+// - projectRoot: needed to resolve realtive sample paths and hash current sample files.
+// - prevHash: lookup function to get previous content hash for a sample rel path (from your last commit manifest)
+func ComputeALSLogicalDiff(prevALS []byte, currALSPath, projectRoot string, prevHash HashLookup) (*ALSLogicalDiff, error) {
+	currXML, err := readALSXML(currALSPath)
+	if err != nil {
+		return nil, err
+	}
+	prevIdx := buildALSIndex(prevALS, projectRoot)
+	currIdx := buildALSIndex(currXML, projectRoot)
+
+	// Samples add/remove
+	ps, cs := toSet(prevIdx.samplePaths), toSet(currIdx.samplePaths)
+	diff := &ALSLogicalDiff{}
+	for p := range cs {
+		if _, ok := ps[p]; !ok {
+			diff.Samples.Added = append(diff.Samples.Added, p)
+		}
+	}
+	for p := range ps {
+		if _, ok := cs[p]; !ok {
+			diff.Samples.Removed = append(diff.Samples.Removed, p)
+		}
+	}
+
+	// Samples changed (present in both, content hash differs)
+	for p := range cs {
+		if _, ok := ps[p]; !ok {
+			continue
+		}
+		prevH := ""
+		if prevHash != nil {
+			prevH = prevHash(p)
+		}
+		currH := hashCurrentSample(projectRoot, p)
+		if prevH != "" && currH != "" && !strings.EqualFold(prevH, currH) {
+			diff.Samples.Changed = append(diff.Samples.Changed, p)
+		}
+	}
+
+	// MIDI clip diffs by notes-hash
+	for name, h := range currIdx.midiHash {
+		if ph, ok := prevIdx.midiHash[name]; !ok {
+			diff.MIDI.AddedClips = append(diff.MIDI.AddedClips, name)
+		} else if ph != h {
+			diff.MIDI.ChangedClips = append(diff.MIDI.ChangedClips, name)
+		}
+	}
+	for name := range prevIdx.midiHash {
+		if _, ok := currIdx.midiHash[name]; !ok {
+			diff.MIDI.RemovedClips = append(diff.MIDI.RemovedClips, name)
+		}
+	}
+
+	sort.Strings(diff.Samples.Added)
+	sort.Strings(diff.Samples.Removed)
+	sort.Strings(diff.Samples.Changed)
+	sort.Strings(diff.MIDI.AddedClips)
+	sort.Strings(diff.MIDI.RemovedClips)
+	sort.Strings(diff.MIDI.ChangedClips)
+
+	return diff, nil
+}
+
+type alsIndex struct {
+	samplePaths []string          // normalized, relaive if under project
+	midiHash    map[string]string // clip-name -> sha256(notes-subtree)
+}
+
+// buildALSIndex constructs an alsIndex from UNGZIPPED xml bytes.
+// If xml==nil, returns an empty index.
+func buildALSIndex(xml []byte, projectRoot string) alsIndex {
+	idx := alsIndex{
+		samplePaths: nil,
+		midiHash:    map[string]string{},
+	}
+	if len(xml) == 0 {
+		return idx
+	}
+	// 1) samples: reuse existing extractor
+	paths := extractSamplePaths(xml)
+	idx.samplePaths = normalizeRelPaths(paths, projectRoot)
+
+	// 2) MIDI: hash each MidiCLips Notes subtree
+	idx.midiHash = midiNotesHashes(xml)
+	return idx
+}
+
+func normalizeRelPaths(paths []string, projectRoot string) []string {
+	var out []string
+	seen := map[string]struct{}{}
+	for _, p := range paths {
+		pp := strings.TrimSpace(p)
+		if pp == "" {
+			continue
+		}
+		// absolutize to check containment, then convert back to relative if inside project
+		if !filepath.IsAbs(pp) {
+			pp = filepath.Join(projectRoot, filepath.FromSlash(pp))
+		}
+		pp = filepath.Clean(pp)
+		if rel, err := filepath.Rel(projectRoot, pp); err == nil && !strings.HasPrefix(rel, "..") {
+			pp = filepath.ToSlash(rel)
+		} else {
+			// keep as-is if not under project (still useful for UI)
+			pp = filepath.ToSlash(pp)
+		}
+		if _, ok := seen[pp]; ok {
+			continue
+		}
+		seen[pp] = struct{}{}
+		out = append(out, pp)
+	}
+	sort.Strings(out)
+	return out
+}
+
+func midiNotesHashes(xmlBytes []byte) map[string]string {
+	out := map[string]string{}
+	dec := xml.NewDecoder(bytes.NewReader(xmlBytes))
+	dec.Strict = false
+
+	readValueAttr := func(se xml.StartElement) (string, bool) {
+		for _, a := range se.Attr {
+			if strings.EqualFold(a.Name.Local, "Value") {
+				return a.Value, true
+			}
+		}
+		return "", false
+	}
+
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return out
+		}
+		switch t := tok.(type) {
+		case xml.StartElement:
+			if t.Name.Local == "MidiClip" {
+				var name string
+				h := sha256.New()
+
+				// walk MidiClip subtree
+				depth := 1
+				for depth > 0 {
+					stok, err := dec.Token()
+					if err != nil {
+						break
+					}
+					switch st := stok.(type) {
+					case xml.StartElement:
+						depth++
+						switch st.Name.Local {
+						case "Name", "Annotation":
+							if name == "" {
+								if v, ok := readValueAttr(st); ok {
+									name = v
+								}
+							}
+						case "Notes":
+							// hash Notes subtree for stability
+							var buf bytes.Buffer
+							enc := xml.NewEncoder(&buf)
+							nDepth := 1
+							_ = enc.EncodeToken(st) // include <Notes>
+							for nDepth > 0 {
+								t2, err2 := dec.Token()
+								if err2 != nil {
+									break
+								}
+								switch nt := t2.(type) {
+								case xml.StartElement:
+									nDepth++
+									_ = enc.EncodeToken(nt)
+								case xml.EndElement:
+									_ = enc.EncodeToken(nt)
+									nDepth--
+								case xml.CharData:
+									_ = enc.EncodeToken(nt)
+								}
+							}
+							_ = enc.Flush()
+							_, _ = io.Copy(h, &buf)
+						}
+					case xml.EndElement:
+						depth--
+					}
+				}
+				sum := hex.EncodeToString(h.Sum(nil))
+				if name == "" {
+					name = fmt.Sprintf("clip-%d", len(out)+1)
+				}
+				out[name] = sum
+			}
+		}
+	}
+	return out
+}
+
+func readALSXML(currAlsGzPath string) ([]byte, error) {
+	f, err := os.Open(currAlsGzPath)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	gr, err := gzip.NewReader(f)
+	if err != nil {
+		return nil, err
+	}
+	defer gr.Close()
+	return io.ReadAll(gr)
+}
+
+func toSet(xs []string) map[string]struct{} {
+	m := make(map[string]struct{}, len(xs))
+	for _, x := range xs {
+		m[x] = struct{}{}
+	}
+	return m
+}
+
+func hashCurrentSample(projectRoot, relOrAbs string) string {
+	// resolve rel to abs under projectRoot
+	p := relOrAbs
+	if !filepath.IsAbs(p) {
+		p = filepath.Join(projectRoot, filepath.FromSlash(relOrAbs))
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:])
+}
 
 // CollectNewSamples:
 //  1. gunzips the .als into memory

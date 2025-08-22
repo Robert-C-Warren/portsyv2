@@ -13,6 +13,6 @@
 <select id="project-select" class="select" bind:value={selected} on:change={handle} {disabled}>
     <option value="">Select a project…</option>
     {#each projects as p}
-        <option value={p.name}>{p.name}</option>
+        <option class="project-highlight" value={p.name}>{p.name}</option>
     {/each}
 </select>

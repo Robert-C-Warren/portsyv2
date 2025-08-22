@@ -8,6 +8,9 @@
 	--button: #e8b430;
 	--panel: #77716e;
 	--selected-tab: #ef8354;
+	--added: #30a749;
+	--changed: #379ca0;
+	--removed: #8d2b2b;
 }
 html,
 body {
@@ -112,7 +115,16 @@ a {
 	border: 1px solid var(--border);
 	border-radius: 8px;
 	margin: 6px 0;
-	background: #FF2E63;
+	background: var(--selected-tab);
+}
+.item-added {
+	background: var(--added);
+}
+.item-changed {
+	background: var(--changed);
+}
+.item-removed {
+	background: var(--removed);
 }
 .badge {
 	padding: 2px 8px;

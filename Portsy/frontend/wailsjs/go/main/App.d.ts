@@ -3,7 +3,7 @@
 import {backend} from '../models';
 import {main} from '../models';
 
-export function DiffJSON(arg1:string,arg2:string):Promise<string>;
+export function DiffJSON(arg1:string):Promise<string>;
 
 export function ListRemoteProjects():Promise<Array<backend.ProjectDoc>>;
 
