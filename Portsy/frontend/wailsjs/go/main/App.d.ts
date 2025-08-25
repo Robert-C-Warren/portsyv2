@@ -5,6 +5,8 @@ import {main} from '../models';
 
 export function DiffJSON(arg1:string):Promise<string>;
 
+export function GetDiffForProject(arg1:string):Promise<string>;
+
 export function ListRemoteProjects():Promise<Array<backend.ProjectDoc>>;
 
 export function PendingJSON(arg1:string):Promise<string>;

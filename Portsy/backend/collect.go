@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -20,6 +21,7 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 type ALSLogicalDiff struct {
@@ -568,11 +570,15 @@ func WatchAllProjects(
 			return
 		}
 		name := filepath.Base(projectPath)
+		runtime.EventsEmit(ctx, "log", fmt.Sprintf("[WatchAll] start %s (%s)", name, projectPath))
+		log.Printf("[WatchAll] start %s (%s)", name, projectPath)
+
 		cctx, cancel := context.WithCancel(ctx)
 		watchers[projectPath] = cancel
 		go func() {
-			_ = WatchProjectALS(cctx, name, projectPath, debounce, onSave)
-			// When WatchProjectALS returns (ctx canceled), we just exit goroutine
+			err := WatchProjectALS(cctx, name, projectPath, debounce, onSave)
+			log.Printf("[WatchAll] WatchProjectALS exit %s err=%v", name, err)
+			runtime.EventsEmit(ctx, "log", fmt.Sprintf("[WatchAll] WatchProjectALS exit %s err=%v", name, err))
 		}()
 	}
 
@@ -582,6 +588,9 @@ func WatchAllProjects(
 			start(p)
 		}
 	}
+
+	// DEBUG_________________________________
+	runtime.EventsEmit(ctx, "log", "[WatchAll] initial scan complete")
 
 	// Debounced rescan on root changes
 	var rescanT *time.Timer
@@ -597,6 +606,8 @@ func WatchAllProjects(
 			}
 		})
 	}
+
+	runtime.EventsEmit(ctx, "log", "[WatchAll] rescan triggered")
 
 	for {
 		select {

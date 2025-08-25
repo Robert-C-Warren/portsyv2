@@ -4,12 +4,14 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
 type SaveEvent struct {
@@ -30,6 +32,14 @@ func WatchProjectALS(
 	if err != nil {
 		return err
 	}
+
+	// DEBUG________________________________J
+	log.Printf("[WatchProjectALS] watching %s (als=%s)", projectName, alsPath)
+	runtime.EventsEmit(ctx, "log", fmt.Sprintf("[WatchProjectALS] watching %s (als=%s)", projectName, alsPath))
+
+	alsPathLC := strings.ToLower(filepath.Clean(alsPath))
+	alsBaseLC := strings.ToLower(filepath.Base(alsPathLC))
+	projDirLC := strings.ToLower(filepath.Clean(projectPath))
 
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -61,18 +71,34 @@ func WatchProjectALS(
 	for {
 		select {
 		case <-ctx.Done():
+			log.Printf("[WatchProjectALS] ctx done for %s", projectName)
 			return ctx.Err()
+
 		case ev := <-w.Events:
-			if !strings.EqualFold(filepath.Clean(ev.Name), filepath.Clean(alsPath)) {
+			log.Printf("[fsnotify] %s op=%v", ev.Name, ev.Op)
+			runtime.EventsEmit(ctx, "log", fmt.Sprintf("[fsnotify] %s op=%v", ev.Name, ev.Op))
+
+			if ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Chmod) == 0 {
 				continue
 			}
-			if ev.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Chmod) != 0 {
+			nameLC := strings.ToLower(filepath.Clean(ev.Name))
+			baseLC := strings.ToLower(filepath.Base(nameLC))
+
+			if nameLC == alsPathLC {
+				log.Printf("[WatchProjectALS] match direct %s", ev.Name)
 				schedule()
+				continue
 			}
+			if filepath.Dir(nameLC) == projDirLC && strings.HasSuffix(baseLC, ".als") && baseLC == alsBaseLC {
+				log.Printf("[WatchProjectALS] match replace %s", ev.Name)
+				schedule()
+				continue
+			}
+
 		case err := <-w.Errors:
 			if err != nil {
-				// Log in your logger if you have one; continue watching
-				_ = err
+				log.Printf("[fsnotify:error] %v", err)
+				runtime.EventsEmit(ctx, "log", fmt.Sprintf("[fsnotify:error] %v", err))
 			}
 		}
 	}

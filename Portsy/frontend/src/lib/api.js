@@ -38,3 +38,7 @@ export function onEvent(eventName, handler) {
     return EventsOn(eventName, handler);
   } catch { /* ignore in dev without generator */ }
 }
+
+// ----- WATCHER ------
+export const startWatcherAll = (root, autopush = false) => call('StartWatcherAll', root, autopush);
+export const stopWatcherAll = () => call('StopWatcherAll');

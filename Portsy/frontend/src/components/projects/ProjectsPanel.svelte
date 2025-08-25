@@ -32,6 +32,10 @@
 	<div class="spread">
 		<h3>Projects</h3>
 		<button class="btn" on:click={load}>Refresh</button>
+		<label class="row">
+			<input type="checkbox" bind:checked={autoPush} />
+			<span>Auto‑push after save</span>
+		</label>
 	</div>
 	{#if loading}<p class="label">Loading…</p>{/if}
 	{#if error}<p class="label">Error: {error}</p>{/if}

@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -17,9 +19,10 @@ import (
 )
 
 type App struct {
-	ctx     context.Context
-	cliPath string
-	meta    *backend.MetaStore
+	ctx         context.Context
+	cliPath     string
+	meta        *backend.MetaStore
+	currentRoot string
 }
 
 type RootStatsResult struct {
@@ -188,8 +191,23 @@ func (a *App) PendingJSON(root string) (string, error) {
 }
 
 func (a *App) DiffJSON(root string) (string, error) {
-	// Use the CLI's diff mode and return its JSON directly.
-	return a.runCmd(a.ctx, "-mode=diff", "-root", root, "-json")
+	if strings.TrimSpace(root) == "" {
+		return "", fmt.Errorf("no root selected")
+	}
+	out, err := a.runCmd(a.ctx, "-mode", "diff", "-root", root, "-json")
+	if err != nil {
+		return "", err
+	}
+	t := strings.TrimSpace(out)
+	if t == "" || (t[0] != '{' && t[0] != '[') {
+		// Convert usage/log text on stdout into a real error for the UI.
+		firstLine := t
+		if i := strings.IndexByte(firstLine, '\n'); i >= 0 {
+			firstLine = firstLine[:i]
+		}
+		return "", fmt.Errorf("CLI did not return JSON: %s", firstLine)
+	}
+	return t, nil
 }
 
 func (a *App) Push(root, project, msg string) (string, error) {
@@ -227,6 +245,7 @@ func (a *App) Rollback(project, dest, commit string) (string, error) {
 // ---- watcher (in-process), emits UI events ----
 
 func (a *App) StartWatcherAll(root string, autopush bool) error {
+	a.currentRoot = root
 	if watchCancel != nil {
 		watchCancel()
 		watchCancel = nil
@@ -234,21 +253,37 @@ func (a *App) StartWatcherAll(root string, autopush bool) error {
 	ctx, cancel := context.WithCancel(a.ctx)
 	watchCancel = cancel
 
+	log.Printf("[StartWatcherAll] root=%s autopush=%v", root, autopush)
+	runtime.EventsEmit(a.ctx, "log", fmt.Sprintf("[StartWatcherAll] root=%s autopush=%v", root, autopush))
+
 	go func() {
+		log.Printf("[StartWatcherAll] entering WatchAllProjects on %s", root)
+		runtime.EventsEmit(a.ctx, "log", fmt.Sprintf("[StartWatcherAll] entering WatchAllProjects on %s", root))
+
 		_ = backend.WatchAllProjects(ctx, root, 750*time.Millisecond, func(evt backend.SaveEvent) {
+			log.Printf("[Save] %s  als=%s", evt.ProjectName, evt.ALSPath)
+			runtime.EventsEmit(a.ctx, "log", fmt.Sprintf("[Save] %s  als=%s", evt.ProjectName, evt.ALSPath))
+
 			_, _ = backend.CollectNewSamples(ctx, evt.ProjectPath, evt.ALSPath)
+
 			runtime.EventsEmit(a.ctx, "alsSaved", map[string]any{
 				"project": evt.ProjectName,
 				"path":    evt.ALSPath,
 				"at":      evt.DetectedAt.Format(time.RFC3339),
 			})
+
 			if autopush {
 				_, _ = a.runCmd(a.ctx, "-mode=push", "-root", root, "-project", evt.ProjectName, "-msg", "autosync: "+time.Now().Format(time.RFC3339))
 				runtime.EventsEmit(a.ctx, "pushDone", map[string]any{"project": evt.ProjectName})
 			}
 		})
+
+		log.Printf("[StartWatcherAll] WatchAllProjects returned (ctx canceled?)")
+		runtime.EventsEmit(a.ctx, "log", "[StartWatcherAll] WatchAllProjects returned (ctx canceled?)")
 	}()
+
 	runtime.EventsEmit(a.ctx, "log", fmt.Sprintf("Watcher started on: %s (autopush=%v)", root, autopush))
+	log.Printf("Watcher started on: %s (autopush=%v)", root, autopush)
 	return nil
 }
 
@@ -269,4 +304,78 @@ func (a *App) ListRemoteProjects() ([]backend.ProjectDoc, error) {
 		ctx = context.Background()
 	}
 	return a.meta.ListProjects(ctx)
+}
+
+// GetDiffForProject returns JSON for a single project by name.
+// It depends on StartWatcherAll having established the current root.
+func (a *App) GetDiffForProject(name string) (string, error) {
+	if strings.TrimSpace(name) == "" {
+		return "", fmt.Errorf("project name required")
+	}
+	root := a.currentRoot
+	if strings.TrimSpace(root) == "" {
+		return "", fmt.Errorf("no root selected (StartWatcherAll not called yet)")
+	}
+
+	raw, err := a.DiffJSON(root)
+	if err != nil {
+		return "", err
+	}
+
+	// Try several common shapes without assuming a specific struct.
+
+	// 1) Array of per-project objects
+	var arr []map[string]any
+	if err := json.Unmarshal([]byte(raw), &arr); err == nil && len(arr) > 0 {
+		for _, it := range arr {
+			// match on "project" | "name" | "projectName"
+			if v, ok := it["project"]; ok && strings.EqualFold(fmt.Sprint(v), name) {
+				b, _ := json.Marshal(it)
+				return string(b), nil
+			}
+			if v, ok := it["projectName"]; ok && strings.EqualFold(fmt.Sprint(v), name) {
+				b, _ := json.Marshal(it)
+				return string(b), nil
+			}
+			if v, ok := it["name"]; ok && strings.EqualFold(fmt.Sprint(v), name) {
+				b, _ := json.Marshal(it)
+				return string(b), nil
+			}
+			// nested { project: { name: ... } }
+			if pv, ok := it["project"].(map[string]any); ok {
+				if v, ok := pv["name"]; ok && strings.EqualFold(fmt.Sprint(v), name) {
+					b, _ := json.Marshal(it)
+					return string(b), nil
+				}
+			}
+		}
+		// not found; return empty object with project name so UI can handle gracefully
+		empty := map[string]any{"project": name, "changedCount": 0, "files": []any{}}
+		b, _ := json.Marshal(empty)
+		return string(b), nil
+	}
+
+	// 2) Object keyed by project name OR { projects: { name: {...} } }
+	var obj map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &obj); err == nil && len(obj) > 0 {
+		// { projects: { <name>: {...} } }
+		if pm, ok := obj["projects"]; ok {
+			var m map[string]json.RawMessage
+			if json.Unmarshal(pm, &m) == nil {
+				if v, ok := m[name]; ok {
+					return string(v), nil
+				}
+			}
+		}
+		// { <name>: {...} }
+		if v, ok := obj[name]; ok {
+			return string(v), nil
+		}
+		empty := map[string]any{"project": name, "changedCount": 0, "files": []any{}}
+		b, _ := json.Marshal(empty)
+		return string(b), nil
+	}
+
+	// 3) Fallback: give the whole raw JSON back (last resort)
+	return raw, nil
 }
