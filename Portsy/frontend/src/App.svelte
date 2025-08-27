@@ -10,7 +10,7 @@
 	import PullPanel from "./components/pull/PullPanel.svelte";
 	import LogViewer from "./components/LogViewer.svelte";
 
-	import { ScanJSON, PendingJSON, DiffJSON, Push, StartWatcherAll, StopWatcherAll, Pull } from "../wailsjs/go/main/App.js";
+	import { ScanJSON, PendingJSON, DiffJSON, Push, StartWatcherAll, StopWatcherAll, Pull, GetDiffForProject } from "../wailsjs/go/main/App.js";
 	import { EventsOn } from "../wailsjs/runtime/runtime.js";
 	import { PickRoot, RootStats } from "../wailsjs/go/main/App.js";
 	import { logStore } from "./stores/log";
@@ -33,24 +33,28 @@
 	let diff = [];
 	let watching = false;
 	let commitMsg = "";
-	let autoPush = false; 
+	let autoPush = false;
 
-	function projectSliceFromDiff(full, name) {
-		if (!full || !name) return null;
-
-		// Case A: array of per-project entries
-		if (Array.isArray(full)) {
-			const hit = full.find((x) => (x?.project || x?.name || x?.projectName) === name || x?.project?.name === name);
-			return hit || null;
+	async function applyAutoPush(v) {
+		autoPush = v;
+		if (watching && root) {
+			// ✅ remove the ':' after await
+			await StopWatcherAll();
+			await StartWatcherAll(root, autoPush);
 		}
+	}
 
-		// Case B: object keyed by name or nested under "projects"
-		if (full && typeof full === "object") {
-			if (full.projects && full.projects[name]) return full.projects[name];
-			if (full[name]) return full[name];
-		}
+	function baseName(s) {
+		if (!s) return "";
+		const parts = String(s).split(/[/\\]/);
+		return parts[parts.length - 1];
+	}
 
-		return null;
+	function sameProjectKey(a, b) {
+		if (!a || !b) return false;
+		a = String(a).trim().toLowerCase();
+		b = String(b).trim().toLowerCase();
+		return a === b || baseName(a) === baseName(b);
 	}
 
 	function show(s) {
@@ -91,7 +95,7 @@
 			watching = false;
 		}
 
-		await StartWatcherAll(root, autoPush)
+		await StartWatcherAll(root, autoPush);
 	}
 
 	function normalizeProjects(raw) {
@@ -135,24 +139,29 @@
 
 	async function loadDiff() {
 		if (!root || !selectedProject) return;
-		try {
-			show(`Diff: ${selectedProject}`);
-			// Backend DiffJSON actually takes only (root) and returns all projects
-			const res = await DiffJSON(root);
-			const full = JSON.parse(res);
-			const slice = projectSliceFromDiff(full, selectedProject) || { project: selectedProject, changedCount: 0, files: [] };
-			diff = slice;
+		const res = await GetDiffForProject(selectedProject);
+		diff = JSON.parse(res);
+	}
 
-			// Update pending badge based on slice
-			try {
-				const changed = !!(slice?.changedCount || slice?.files?.length);
-				pending = Array.isArray(pending) ? pending : [];
-			} catch {}
-			show(res);
-		} catch (e) {
-			show(`Diff failed: ${e?.message || e}`);
-			console.error("DiffJSON error:", e);
+	function projectSliceFromAny(full, name) {
+		if (!full) return null;
+		if (Array.isArray(full)) {
+			return full.find((x) => sameProjectKey(x?.project ?? x?.name ?? x?.projectName, name) || sameProjectKey(x?.projectPath ?? x?.path, name)) || null;
 		}
+
+		if (full.projects && typeof full.projects === "object") {
+			for (const [k, v] of Object.entries(full.projects)) {
+				if (sameProjectKey(k, name) || sameProjectKey(v?.project ?? v?.name, name) || sameProjectKey(v?.projectPath ?? v?.path, name)) return v;
+			}
+		}
+
+		if (typeof full === "object") {
+			for (const [k, v] of Object.entries(full)) {
+				if (k === "projects") continue;
+				if (sameProjectKey(k, name)) return v;
+			}
+		}
+		return null;
 	}
 
 	async function doPush() {
@@ -177,29 +186,37 @@
 			watching = false;
 		}
 	}
-
 	// Derived state
 	$: canPush = !!root && !!selectedProject && commitMsg.trim().length > 0 && commitMsg.length <= 500;
 
 	// Wire events only; do NOT auto-scan on mount
 	let offSaved, offPushed;
 	onMount(() => {
-		offSaved = EventsOn("alsSaved", (p) => {
+		offSaved = EventsOn("alsSaved", async (p) => {
 			const proj = p?.project;
 			const file = (p?.path || "").split(/[/\\]/).pop() || "set.als";
-
-			// ➊ Write to the per‑project store that <LogViewer> uses
 			if (proj) {
 				logStore.info(`Detected save: ${file}`, proj, p);
+				if (p?.summary) {
+					logStore.info(`Changes: ${p.summary}`, proj);
+				} else {
+					try {
+						const res = await GetDiffForProject(proj);
+						const d = JSON.parse(res);
+						if (d.changedCount > 0) {
+							const head = d.files
+								.slice(0, 6)
+								.map((f) => `${f.status}: ${f.path}`)
+								.join(", ");
+							const more = d.files.length > 6 ? ` (+${d.files.length - 6} more)` : "";
+							logStore.info(`Changes: ${head}${more}`, proj, d);
+						}
+					} catch {}
+				}
 			}
-
-			// refresh badges
 			loadPending();
-
-			// refresh diff if the user is currently looking at this project
-			const norm = (s) => (s || "").trim().toLowerCase();
-			if (proj && norm(proj) === norm(selectedProject) && (currentTab === "projects" || currentTab === "push")) {
-				loadDiff();
+			if (proj && proj.toLowerCase() === (selectedProject || "").toLowerCase() && (currentTab === "projects" || currentTab === "push")) {
+				await loadDiff();
 			}
 		});
 
@@ -218,10 +235,45 @@
 		offSaved?.();
 		offPushed?.();
 	});
+
+	function normalizeProjectDiff(slice, projectName) {
+		// Empty/unknown → canonical empty
+		if (!slice || typeof slice !== "object") {
+			return { project: projectName, changedCount: 0, files: [] };
+		}
+
+		// Already in UI shape?
+		if (Array.isArray(slice.files) || typeof slice.changedCount === "number") {
+			const files = Array.isArray(slice.files) ? slice.files : [];
+			const changedCount = typeof slice.changedCount === "number" ? slice.changedCount : files.length;
+			return { project: projectName, changedCount, files };
+		}
+
+		// Common CLI shapes
+		const files = [];
+		const pushAll = (list, status) => {
+			if (!Array.isArray(list)) return;
+			for (const it of list) {
+				const p = it?.path ?? it?.Path ?? it;
+				if (p) files.push({ path: String(p), status });
+			}
+		};
+		pushAll(slice.Added || slice.added, "added");
+		pushAll(slice.Changed || slice.changed, "modified");
+		pushAll(slice.Removed || slice.removed, "deleted");
+
+		// Optional ALS logical hint → ensure we at least show the set
+		if (files.length === 0 && (slice.Logical?.ALSChanged || slice.logical?.alsChanged)) {
+			const alsPath = slice.Logical?.ALSPath || slice.logical?.alsPath || "set.als";
+			files.push({ path: alsPath, status: "modified" });
+		}
+
+		return { project: projectName, changedCount: files.length, files };
+	}
 </script>
 
 <div class="shell">
-	<HeaderBar {root} onScan={loadProjects} onPending={loadPending} {watching} {toggleWatch} {pickRoot} />
+	<HeaderBar {root} onScan={loadProjects} onPending={loadPending} {watching} {toggleWatch} {pickRoot} {autoPush} onToggleAutoPush={applyAutoPush} />
 
 	<!-- no default tab; user clicks one -->
 	<Tabs bind:value={currentTab} tabs={TABS} />
@@ -238,14 +290,15 @@
 
 			{#if currentTab === "projects"}
 				<div class="muted projects-row">Projects found:</div>
-				<ProjectSelect {projects} bind:selected={selectedProject} onChange={loadDiff} disabled={!root || projects.length === 0} />
+				<!-- ✅ use Svelte's on:change -->
+				<ProjectSelect {projects} bind:selected={selectedProject} on:change={loadDiff} disabled={!root || projects.length === 0} />
 				{#if !root}
 					<div class="row projects-row">Choose a root to scan.</div>
 				{:else if projects.length === 0}
 					<div class="row projects-row">No projects found.</div>
 				{:else}
 					{#each projects as p}
-						<!-- <div class="row projects-row">• {p.name} {p.hasPortsy ? "" : "(no .portsy)"}</div> -->
+						<!-- <div class="row projects-row">• {p.name} {p.hasPortsy ? "" : "(no .portsy)"} </div> -->
 					{/each}
 				{/if}
 			{/if}

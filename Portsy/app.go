@@ -30,6 +30,17 @@ type RootStatsResult struct {
 	IsDriveRoot bool `json:"isDriveRoot"`
 }
 
+type uiFile struct {
+	Path   string `json:"path"`
+	Status string `json:"status"`
+}
+
+type uiProjectDiff struct {
+	Project      string   `json:"project"`
+	ChangedCount int      `json:"changedCount"`
+	Files        []uiFile `json:"files"`
+}
+
 var (
 	watchCancel context.CancelFunc // global cancel for the watcher
 )
@@ -269,7 +280,29 @@ func (a *App) StartWatcherAll(root string, autopush bool) error {
 			runtime.EventsEmit(a.ctx, "alsSaved", map[string]any{
 				"project": evt.ProjectName,
 				"path":    evt.ALSPath,
-				"at":      evt.DetectedAt.Format(time.RFC3339),
+				"at":      time.Now().Format(time.RFC3339),
+				"summary": func() string {
+					js, err := a.GetDiffForProject(evt.ProjectName)
+					if err != nil || js == "" {
+						return ""
+					}
+					var d uiProjectDiff
+					if json.Unmarshal([]byte(js), &d) != nil || len(d.Files) == 0 {
+						return ""
+					}
+					max := 5
+					if len(d.Files) < max {
+						max = len(d.Files)
+					}
+					var parts []string
+					for _, f := range d.Files[:max] {
+						parts = append(parts, fmt.Sprintf("%s: %s", f.Status, f.Path))
+					}
+					if len(d.Files) > max {
+						parts = append(parts, fmt.Sprintf("(+%d more)", len(d.Files)-max))
+					}
+					return strings.Join(parts, ", ")
+				}(),
 			})
 
 			if autopush {
@@ -306,76 +339,309 @@ func (a *App) ListRemoteProjects() ([]backend.ProjectDoc, error) {
 	return a.meta.ListProjects(ctx)
 }
 
-// GetDiffForProject returns JSON for a single project by name.
-// It depends on StartWatcherAll having established the current root.
+// GetDiffForProject returns a single project's diff in the UI shape:
+// { project, changedCount, files:[{path,status}] }
 func (a *App) GetDiffForProject(name string) (string, error) {
-	if strings.TrimSpace(name) == "" {
-		return "", fmt.Errorf("project name required")
-	}
+	// Determine root (use whatever you store when StartWatcherAll runs)
 	root := a.currentRoot
-	if strings.TrimSpace(root) == "" {
-		return "", fmt.Errorf("no root selected (StartWatcherAll not called yet)")
+	if root == "" {
+		// Fall back to an empty diff rather than erroring
+		empty := uiProjectDiff{Project: name, ChangedCount: 0, Files: []uiFile{}}
+		b, _ := json.Marshal(empty)
+		return string(b), nil
 	}
 
-	raw, err := a.DiffJSON(root)
+	// Ask the CLI/backing code for the FULL diff JSON, then slice here.
+	rawJSON, err := a.DiffJSON(root)
 	if err != nil {
 		return "", err
 	}
+	if rawJSON == "" {
+		empty := uiProjectDiff{Project: name, ChangedCount: 0, Files: []uiFile{}}
+		b, _ := json.Marshal(empty)
+		return string(b), nil
+	}
 
-	// Try several common shapes without assuming a specific struct.
+	var full any
+	if err := json.Unmarshal([]byte(rawJSON), &full); err != nil {
+		return "", fmt.Errorf("parse diff json: %w", err)
+	}
 
-	// 1) Array of per-project objects
-	var arr []map[string]any
-	if err := json.Unmarshal([]byte(raw), &arr); err == nil && len(arr) > 0 {
-		for _, it := range arr {
-			// match on "project" | "name" | "projectName"
-			if v, ok := it["project"]; ok && strings.EqualFold(fmt.Sprint(v), name) {
-				b, _ := json.Marshal(it)
+	// --------------- Find the per-project slice ---------------
+	var asMap map[string]any
+	var asArr []any
+
+	switch t := full.(type) {
+	case []any:
+		asArr = t
+	case map[string]any:
+		asMap = t
+	default:
+		// Unknown payload; return empty
+		empty := uiProjectDiff{Project: name, ChangedCount: 0, Files: []uiFile{}}
+		b, _ := json.Marshal(empty)
+		return string(b), nil
+	}
+
+	// Case A: array
+	if len(asArr) > 0 {
+		for _, it := range asArr {
+			m, ok := it.(map[string]any)
+			if !ok {
+				continue
+			}
+			n := ""
+			if v, ok := m["project"].(string); ok {
+				n = v
+			} else if v, ok := m["name"].(string); ok {
+				n = v
+			} else if v, ok := m["projectName"].(string); ok {
+				n = v
+			}
+			p := ""
+			if v, ok := m["projectPath"].(string); ok {
+				p = v
+			} else if v, ok := m["path"].(string); ok {
+				p = v
+			}
+			if sameProjectKey(n, name) || sameProjectKey(p, name) {
+				out := normalizeProjectDiffFromMap(name, m)
+				b, _ := json.Marshal(out)
 				return string(b), nil
 			}
-			if v, ok := it["projectName"]; ok && strings.EqualFold(fmt.Sprint(v), name) {
-				b, _ := json.Marshal(it)
-				return string(b), nil
-			}
-			if v, ok := it["name"]; ok && strings.EqualFold(fmt.Sprint(v), name) {
-				b, _ := json.Marshal(it)
-				return string(b), nil
-			}
-			// nested { project: { name: ... } }
-			if pv, ok := it["project"].(map[string]any); ok {
-				if v, ok := pv["name"]; ok && strings.EqualFold(fmt.Sprint(v), name) {
-					b, _ := json.Marshal(it)
+		}
+	}
+
+	// Case B: object with "projects" map
+	if projAny, ok := asMap["projects"]; ok {
+		if projMap, ok := projAny.(map[string]any); ok {
+			for k, v := range projMap {
+				m, ok := v.(map[string]any)
+				if !ok {
+					continue
+				}
+				n := ""
+				if val, ok := m["project"].(string); ok {
+					n = val
+				} else if val, ok := m["name"].(string); ok {
+					n = val
+				} else if val, ok := m["projectName"].(string); ok {
+					n = val
+				}
+				p := ""
+				if val, ok := m["projectPath"].(string); ok {
+					p = val
+				} else if val, ok := m["path"].(string); ok {
+					p = val
+				}
+				if sameProjectKey(k, name) || sameProjectKey(n, name) || sameProjectKey(p, name) {
+					out := normalizeProjectDiffFromMap(name, m)
+					b, _ := json.Marshal(out)
 					return string(b), nil
 				}
 			}
 		}
-		// not found; return empty object with project name so UI can handle gracefully
-		empty := map[string]any{"project": name, "changedCount": 0, "files": []any{}}
-		b, _ := json.Marshal(empty)
-		return string(b), nil
 	}
 
-	// 2) Object keyed by project name OR { projects: { name: {...} } }
-	var obj map[string]json.RawMessage
-	if err := json.Unmarshal([]byte(raw), &obj); err == nil && len(obj) > 0 {
-		// { projects: { <name>: {...} } }
-		if pm, ok := obj["projects"]; ok {
-			var m map[string]json.RawMessage
-			if json.Unmarshal(pm, &m) == nil {
-				if v, ok := m[name]; ok {
-					return string(v), nil
+	// Case C: plain object keyed by name/path
+	if len(asMap) > 0 {
+		for k, v := range asMap {
+			if k == "projects" {
+				continue
+			}
+			if sameProjectKey(k, name) {
+				if m, ok := v.(map[string]any); ok {
+					out := normalizeProjectDiffFromMap(name, m)
+					b, _ := json.Marshal(out)
+					return string(b), nil
+				}
+				// if it's not a map, still return empty normalized
+				break
+			}
+			// also check identity hints inside the value
+			if m, ok := v.(map[string]any); ok {
+				n := ""
+				if val, ok := m["project"].(string); ok {
+					n = val
+				} else if val, ok := m["name"].(string); ok {
+					n = val
+				} else if val, ok := m["projectName"].(string); ok {
+					n = val
+				}
+				p := ""
+				if val, ok := m["projectPath"].(string); ok {
+					p = val
+				} else if val, ok := m["path"].(string); ok {
+					p = val
+				}
+				if sameProjectKey(n, name) || sameProjectKey(p, name) {
+					out := normalizeProjectDiffFromMap(name, m)
+					b, _ := json.Marshal(out)
+					return string(b), nil
 				}
 			}
 		}
-		// { <name>: {...} }
-		if v, ok := obj[name]; ok {
-			return string(v), nil
+	}
+
+	// Not found → empty normalized object (never return undefined values)
+	empty := uiProjectDiff{Project: name, ChangedCount: 0, Files: []uiFile{}}
+	b, _ := json.Marshal(empty)
+	return string(b), nil
+}
+
+func baseName(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	// Handle both / and \ on Windows
+	s = strings.ReplaceAll(s, "\\", "/")
+	parts := strings.Split(s, "/")
+	return parts[len(parts)-1]
+}
+
+func sameProjectKey(a, b string) bool {
+	if a == "" || b == "" {
+		return false
+	}
+	al := strings.ToLower(strings.TrimSpace(a))
+	bl := strings.ToLower(strings.TrimSpace(b))
+	return al == bl || baseName(al) == baseName(bl)
+}
+
+// normalizeProjectDiff converts a raw per-project diff (various shapes) into the UI shape
+// It accepts either map[string]any or a JSON byte slice.
+func normalizeProjectDiff(name string, raw any) (string, error) {
+	// If already normalized, just pass through.
+	if m, ok := raw.(map[string]any); ok {
+		if _, ok := m["files"]; ok {
+			b, _ := json.Marshal(m)
+			return string(b), nil
 		}
-		empty := map[string]any{"project": name, "changedCount": 0, "files": []any{}}
-		b, _ := json.Marshal(empty)
+	}
+
+	// First, marshal raw → bytes so we can unmarshal into flexible structs.
+	bin, err := json.Marshal(raw)
+	if err != nil {
+		return "", err
+	}
+
+	// Case A: already UI-like but missing changedCount
+	var uiLike struct {
+		Project      string   `json:"project"`
+		Files        []uiFile `json:"files"`
+		ChangedCount *int     `json:"changedCount"`
+	}
+	if json.Unmarshal(bin, &uiLike) == nil && (len(uiLike.Files) > 0 || uiLike.ChangedCount != nil) {
+		out := uiProjectDiff{Project: name, Files: uiLike.Files}
+		if uiLike.ChangedCount != nil {
+			out.ChangedCount = *uiLike.ChangedCount
+		} else {
+			out.ChangedCount = len(uiLike.Files)
+		}
+		b, _ := json.Marshal(out)
 		return string(b), nil
 	}
 
-	// 3) Fallback: give the whole raw JSON back (last resort)
-	return raw, nil
+	// Case B: CLI shape with Added/Changed/Removed (items may be objects or strings)
+	var cliLike struct {
+		Added   []json.RawMessage `json:"Added"`
+		Changed []json.RawMessage `json:"Changed"`
+		Removed []json.RawMessage `json:"Removed"`
+		Logical any               `json:"Logical"`
+	}
+	_ = json.Unmarshal(bin, &cliLike) // if it fails, arrays stay nil
+
+	files := make([]uiFile, 0, 16)
+	push := func(list []json.RawMessage, status string) {
+		for _, it := range list {
+			var obj map[string]any
+			if json.Unmarshal(it, &obj) == nil {
+				if p, ok := obj["path"]; ok {
+					files = append(files, uiFile{Path: fmt.Sprint(p), Status: status})
+					continue
+				}
+				if p, ok := obj["Path"]; ok {
+					files = append(files, uiFile{Path: fmt.Sprint(p), Status: status})
+					continue
+				}
+			}
+			// maybe it's just a JSON string
+			var s string
+			if json.Unmarshal(it, &s) == nil && s != "" {
+				files = append(files, uiFile{Path: s, Status: status})
+			}
+		}
+	}
+	push(cliLike.Added, "added")
+	push(cliLike.Changed, "modified")
+	push(cliLike.Removed, "deleted")
+
+	out := uiProjectDiff{Project: name, ChangedCount: len(files), Files: files}
+	b, _ := json.Marshal(out)
+	return string(b), nil
+}
+
+// normalize a per-project "raw" diff object into UI shape
+func normalizeProjectDiffFromMap(name string, m map[string]any) uiProjectDiff {
+	// Already UI-like?
+	if filesAny, ok := m["files"]; ok {
+		out := uiProjectDiff{Project: name}
+		if cc, ok := m["changedCount"].(float64); ok {
+			out.ChangedCount = int(cc)
+		}
+		if arr, ok := filesAny.([]any); ok {
+			out.Files = make([]uiFile, 0, len(arr))
+			for _, it := range arr {
+				if obj, ok := it.(map[string]any); ok {
+					f := uiFile{}
+					if p, ok := obj["path"].(string); ok {
+						f.Path = p
+					}
+					if s, ok := obj["status"].(string); ok {
+						f.Status = s
+					}
+					if f.Path != "" {
+						out.Files = append(out.Files, f)
+					}
+				}
+			}
+			if out.ChangedCount == 0 {
+				out.ChangedCount = len(out.Files)
+			}
+			return out
+		}
+	}
+
+	// CLI-like: Added/Changed/Removed (items may be {"path": "..."} or just strings)
+	pushAll := func(arr any, status string, into *[]uiFile) {
+		list, _ := arr.([]any)
+		for _, it := range list {
+			switch v := it.(type) {
+			case string:
+				if v != "" {
+					*into = append(*into, uiFile{Path: v, Status: status})
+				}
+			case map[string]any:
+				if p, ok := v["path"].(string); ok && p != "" {
+					*into = append(*into, uiFile{Path: p, Status: status})
+					continue
+				}
+				if p, ok := v["Path"].(string); ok && p != "" {
+					*into = append(*into, uiFile{Path: p, Status: status})
+				}
+			}
+		}
+	}
+
+	files := make([]uiFile, 0, 16)
+	pushAll(m["Added"], "added", &files)
+	pushAll(m["Changed"], "modified", &files)
+	pushAll(m["Removed"], "deleted", &files)
+
+	return uiProjectDiff{
+		Project:      name,
+		ChangedCount: len(files),
+		Files:        files,
+	}
 }
