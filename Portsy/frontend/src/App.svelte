@@ -14,6 +14,7 @@
 	import { EventsOn } from "../wailsjs/runtime/runtime.js";
 	import { PickRoot, RootStats } from "../wailsjs/go/main/App.js";
 	import { logStore } from "./stores/log";
+	import { diffs, initDiffBus } from "./stores/diff";
 
 	const TABS = [
 		{ id: "projects", label: "Projects" },
@@ -136,6 +137,12 @@
 			console.error("PendingJSON error:", e);
 		}
 	}
+
+	onMount(() => {
+		console.log('[App] onMount -> initDiffBus');
+		initDiffBus();
+		console.log('[App] diff snapshot at mount:', diffs.debugSnapshot());
+	});
 
 	async function loadDiff() {
 		if (!root || !selectedProject) return;

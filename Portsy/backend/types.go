@@ -41,6 +41,13 @@ type Diff struct {
 	Removed []FileEntry `json:"removed"`
 }
 
+type DiffSummary struct {
+	ProjectID string   `json:"projectId"`
+	Added     []string `json:"added"`
+	Modified  []string `json:"modified"`
+	Deleted   []string `json:"deleted"`
+}
+
 type ProjectSummary struct {
 	Name            string `json:"name"`
 	HasLocalChanges bool   `json:"hasLocalChanges"`

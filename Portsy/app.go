@@ -1,6 +1,8 @@
 package main
 
 import (
+	"Portsy/backend"
+	ui "Portsy/backend/uiapi"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -11,8 +13,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"Portsy/backend"
 
 	"github.com/joho/godotenv"
 	"github.com/wailsapp/wails/v2/pkg/runtime"
@@ -28,17 +28,6 @@ type App struct {
 type RootStatsResult struct {
 	DirCount    int  `json:"dirCount"`
 	IsDriveRoot bool `json:"isDriveRoot"`
-}
-
-type uiFile struct {
-	Path   string `json:"path"`
-	Status string `json:"status"`
-}
-
-type uiProjectDiff struct {
-	Project      string   `json:"project"`
-	ChangedCount int      `json:"changedCount"`
-	Files        []uiFile `json:"files"`
 }
 
 var (
@@ -254,7 +243,6 @@ func (a *App) Rollback(project, dest, commit string) (string, error) {
 }
 
 // ---- watcher (in-process), emits UI events ----
-
 func (a *App) StartWatcherAll(root string, autopush bool) error {
 	a.currentRoot = root
 	if watchCancel != nil {
@@ -272,10 +260,26 @@ func (a *App) StartWatcherAll(root string, autopush bool) error {
 		runtime.EventsEmit(a.ctx, "log", fmt.Sprintf("[StartWatcherAll] entering WatchAllProjects on %s", root))
 
 		_ = backend.WatchAllProjects(ctx, root, 750*time.Millisecond, func(evt backend.SaveEvent) {
-			log.Printf("[Save] %s  als=%s", evt.ProjectName, evt.ALSPath)
-			runtime.EventsEmit(a.ctx, "log", fmt.Sprintf("[Save] %s  als=%s", evt.ProjectName, evt.ALSPath))
-
+			// existing logs...
 			_, _ = backend.CollectNewSamples(ctx, evt.ProjectPath, evt.ALSPath)
+
+			// --- NEW: build & emit a DiffSummary ---
+			js, err := a.GetDiffForProject(evt.ProjectName)
+			if err != nil {
+				log.Printf("[Diff] %s error: %v", evt.ProjectName, err)
+			}
+			summary := ui.BuildSummaryFromProjectJSON(evt.ProjectName, js)
+			// defend against nil slices
+			if summary.Added == nil {
+				summary.Added = []string{}
+			}
+			if summary.Modified == nil {
+				summary.Modified = []string{}
+			}
+			if summary.Deleted == nil {
+				summary.Deleted = []string{}
+			}
+			runtime.EventsEmit(a.ctx, "project:diff", summary)
 
 			runtime.EventsEmit(a.ctx, "alsSaved", map[string]any{
 				"project": evt.ProjectName,
@@ -286,7 +290,7 @@ func (a *App) StartWatcherAll(root string, autopush bool) error {
 					if err != nil || js == "" {
 						return ""
 					}
-					var d uiProjectDiff
+					var d ui.UIProjectDiff
 					if json.Unmarshal([]byte(js), &d) != nil || len(d.Files) == 0 {
 						return ""
 					}
@@ -317,6 +321,7 @@ func (a *App) StartWatcherAll(root string, autopush bool) error {
 
 	runtime.EventsEmit(a.ctx, "log", fmt.Sprintf("Watcher started on: %s (autopush=%v)", root, autopush))
 	log.Printf("Watcher started on: %s (autopush=%v)", root, autopush)
+
 	return nil
 }
 
@@ -346,18 +351,18 @@ func (a *App) GetDiffForProject(name string) (string, error) {
 	root := a.currentRoot
 	if root == "" {
 		// Fall back to an empty diff rather than erroring
-		empty := uiProjectDiff{Project: name, ChangedCount: 0, Files: []uiFile{}}
+		empty := ui.UIProjectDiff{Project: name, ChangedCount: 0, Files: []ui.UIFile{}}
 		b, _ := json.Marshal(empty)
 		return string(b), nil
 	}
 
 	// Ask the CLI/backing code for the FULL diff JSON, then slice here.
-	rawJSON, err := a.DiffJSON(root)
+	rawJSON, err := a.DiffProjectJSON(root, name)
 	if err != nil {
 		return "", err
 	}
 	if rawJSON == "" {
-		empty := uiProjectDiff{Project: name, ChangedCount: 0, Files: []uiFile{}}
+		empty := ui.UIProjectDiff{Project: name, ChangedCount: 0, Files: []ui.UIFile{}}
 		b, _ := json.Marshal(empty)
 		return string(b), nil
 	}
@@ -378,7 +383,7 @@ func (a *App) GetDiffForProject(name string) (string, error) {
 		asMap = t
 	default:
 		// Unknown payload; return empty
-		empty := uiProjectDiff{Project: name, ChangedCount: 0, Files: []uiFile{}}
+		empty := ui.UIProjectDiff{Project: name, ChangedCount: 0, Files: []ui.UIFile{}}
 		b, _ := json.Marshal(empty)
 		return string(b), nil
 	}
@@ -484,7 +489,7 @@ func (a *App) GetDiffForProject(name string) (string, error) {
 	}
 
 	// Not found → empty normalized object (never return undefined values)
-	empty := uiProjectDiff{Project: name, ChangedCount: 0, Files: []uiFile{}}
+	empty := ui.UIProjectDiff{Project: name, ChangedCount: 0, Files: []ui.UIFile{}}
 	b, _ := json.Marshal(empty)
 	return string(b), nil
 }
@@ -509,92 +514,19 @@ func sameProjectKey(a, b string) bool {
 	return al == bl || baseName(al) == baseName(bl)
 }
 
-// normalizeProjectDiff converts a raw per-project diff (various shapes) into the UI shape
-// It accepts either map[string]any or a JSON byte slice.
-func normalizeProjectDiff(name string, raw any) (string, error) {
-	// If already normalized, just pass through.
-	if m, ok := raw.(map[string]any); ok {
-		if _, ok := m["files"]; ok {
-			b, _ := json.Marshal(m)
-			return string(b), nil
-		}
-	}
-
-	// First, marshal raw → bytes so we can unmarshal into flexible structs.
-	bin, err := json.Marshal(raw)
-	if err != nil {
-		return "", err
-	}
-
-	// Case A: already UI-like but missing changedCount
-	var uiLike struct {
-		Project      string   `json:"project"`
-		Files        []uiFile `json:"files"`
-		ChangedCount *int     `json:"changedCount"`
-	}
-	if json.Unmarshal(bin, &uiLike) == nil && (len(uiLike.Files) > 0 || uiLike.ChangedCount != nil) {
-		out := uiProjectDiff{Project: name, Files: uiLike.Files}
-		if uiLike.ChangedCount != nil {
-			out.ChangedCount = *uiLike.ChangedCount
-		} else {
-			out.ChangedCount = len(uiLike.Files)
-		}
-		b, _ := json.Marshal(out)
-		return string(b), nil
-	}
-
-	// Case B: CLI shape with Added/Changed/Removed (items may be objects or strings)
-	var cliLike struct {
-		Added   []json.RawMessage `json:"Added"`
-		Changed []json.RawMessage `json:"Changed"`
-		Removed []json.RawMessage `json:"Removed"`
-		Logical any               `json:"Logical"`
-	}
-	_ = json.Unmarshal(bin, &cliLike) // if it fails, arrays stay nil
-
-	files := make([]uiFile, 0, 16)
-	push := func(list []json.RawMessage, status string) {
-		for _, it := range list {
-			var obj map[string]any
-			if json.Unmarshal(it, &obj) == nil {
-				if p, ok := obj["path"]; ok {
-					files = append(files, uiFile{Path: fmt.Sprint(p), Status: status})
-					continue
-				}
-				if p, ok := obj["Path"]; ok {
-					files = append(files, uiFile{Path: fmt.Sprint(p), Status: status})
-					continue
-				}
-			}
-			// maybe it's just a JSON string
-			var s string
-			if json.Unmarshal(it, &s) == nil && s != "" {
-				files = append(files, uiFile{Path: s, Status: status})
-			}
-		}
-	}
-	push(cliLike.Added, "added")
-	push(cliLike.Changed, "modified")
-	push(cliLike.Removed, "deleted")
-
-	out := uiProjectDiff{Project: name, ChangedCount: len(files), Files: files}
-	b, _ := json.Marshal(out)
-	return string(b), nil
-}
-
 // normalize a per-project "raw" diff object into UI shape
-func normalizeProjectDiffFromMap(name string, m map[string]any) uiProjectDiff {
+func normalizeProjectDiffFromMap(name string, m map[string]any) ui.UIProjectDiff {
 	// Already UI-like?
 	if filesAny, ok := m["files"]; ok {
-		out := uiProjectDiff{Project: name}
+		out := ui.UIProjectDiff{Project: name}
 		if cc, ok := m["changedCount"].(float64); ok {
 			out.ChangedCount = int(cc)
 		}
 		if arr, ok := filesAny.([]any); ok {
-			out.Files = make([]uiFile, 0, len(arr))
+			out.Files = make([]ui.UIFile, 0, len(arr))
 			for _, it := range arr {
 				if obj, ok := it.(map[string]any); ok {
-					f := uiFile{}
+					f := ui.UIFile{}
 					if p, ok := obj["path"].(string); ok {
 						f.Path = p
 					}
@@ -614,34 +546,56 @@ func normalizeProjectDiffFromMap(name string, m map[string]any) uiProjectDiff {
 	}
 
 	// CLI-like: Added/Changed/Removed (items may be {"path": "..."} or just strings)
-	pushAll := func(arr any, status string, into *[]uiFile) {
+	pushAll := func(arr any, status string, into *[]ui.UIFile) {
 		list, _ := arr.([]any)
 		for _, it := range list {
 			switch v := it.(type) {
 			case string:
 				if v != "" {
-					*into = append(*into, uiFile{Path: v, Status: status})
+					*into = append(*into, ui.UIFile{Path: v, Status: status})
 				}
 			case map[string]any:
 				if p, ok := v["path"].(string); ok && p != "" {
-					*into = append(*into, uiFile{Path: p, Status: status})
+					*into = append(*into, ui.UIFile{Path: p, Status: status})
 					continue
 				}
 				if p, ok := v["Path"].(string); ok && p != "" {
-					*into = append(*into, uiFile{Path: p, Status: status})
+					*into = append(*into, ui.UIFile{Path: p, Status: status})
 				}
 			}
 		}
 	}
 
-	files := make([]uiFile, 0, 16)
+	files := make([]ui.UIFile, 0, 16)
 	pushAll(m["Added"], "added", &files)
 	pushAll(m["Changed"], "modified", &files)
 	pushAll(m["Removed"], "deleted", &files)
 
-	return uiProjectDiff{
+	return ui.UIProjectDiff{
 		Project:      name,
 		ChangedCount: len(files),
 		Files:        files,
 	}
+}
+
+func (a *App) DiffProjectJSON(root, project string) (string, error) {
+	if strings.TrimSpace(root) == "" {
+		return "", fmt.Errorf("no root selected")
+	}
+	if strings.TrimSpace(project) == "" {
+		return "", fmt.Errorf("no project specified")
+	}
+	out, err := a.runCmd(a.ctx, "-mode", "diff", "-root", root, "-project", project, "-json")
+	if err != nil {
+		return "", err
+	}
+	t := strings.TrimSpace(out)
+	if t == "" || (t[0] != '{' && t[0] != '[') {
+		firstLine := t
+		if i := strings.IndexByte(firstLine, '\n'); i >= 0 {
+			firstLine = firstLine[:i]
+		}
+		return "", fmt.Errorf("CLI did not return JSON: %s", firstLine)
+	}
+	return t, nil
 }

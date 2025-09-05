@@ -6,6 +6,10 @@ export function DiffJSON(arg1) {
   return window['go']['main']['App']['DiffJSON'](arg1);
 }
 
+export function DiffProjectJSON(arg1, arg2) {
+  return window['go']['main']['App']['DiffProjectJSON'](arg1, arg2);
+}
+
 export function GetDiffForProject(arg1) {
   return window['go']['main']['App']['GetDiffForProject'](arg1);
 }
