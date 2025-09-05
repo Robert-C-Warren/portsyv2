@@ -54,6 +54,10 @@ export function StartWatcherAll(arg1, arg2) {
   return window['go']['main']['App']['StartWatcherAll'](arg1, arg2);
 }
 
+export function Startup(arg1) {
+  return window['go']['main']['App']['Startup'](arg1);
+}
+
 export function StopWatcherAll() {
   return window['go']['main']['App']['StopWatcherAll']();
 }
