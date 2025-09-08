@@ -1,6 +1,7 @@
 package als
 
 import (
+	"bytes"
 	"compress/gzip"
 	"encoding/xml"
 	"io"
@@ -52,7 +53,7 @@ type fileRef struct {
 //
 //	FileRef -> RelativePath (attr) or nested elements containing pathy text.
 func extractSampleRefs(b []byte) []string {
-	dec := xml.NewDecoder(strings.NewReader(string(b)))
+	dec := xml.NewDecoder(bytes.NewReader(b))
 	paths := make(map[string]struct{})
 	var stack []string
 
@@ -108,7 +109,10 @@ func normalizeRel(p string) string {
 }
 
 func looksPathy(s string) bool {
-	return strings.Contains(s, "/") || strings.Contains(s, "\\") || strings.Contains(strings.ToLower(s), ".wav")
+	s = strings.ToLower(s)
+	return strings.Contains(s, "/") || strings.Contains(s, "\\") ||
+		strings.HasSuffix(s, ".wav") || strings.HasSuffix(s, ".aif") ||
+		strings.HasSuffix(s, ".aiff") || strings.HasSuffix(s, ".flac")
 }
 
 func keys(m map[string]struct{}) []string {

@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+
+	syn "Portsy/backend/internal/sync"
 )
 
 // ObjectGetter is the tiny bit of R2 we need (DownloadTo).
@@ -24,7 +26,7 @@ type DiffPath struct {
 
 type DiffJSON struct {
 	Added   []DiffPath      `json:"added"`
-	Changed []DiffPath      `json:"changed"`
+	Changed []DiffPath      `json:"changed"` // Corresponds to "modified"
 	Removed []DiffPath      `json:"removed"`
 	Logical *ALSLogicalDiff `json:"logical,omitempty"`
 }
@@ -48,14 +50,16 @@ func BuildDiffJSON(
 	changedPaths := make([]string, 0, len(changes))
 
 	for _, c := range changes {
-		switch c.Type {
-		case "added":
-			out.Added = append(out.Added, DiffPath{Path: c.Path})
-		case "modified":
-			out.Changed = append(out.Changed, DiffPath{Path: c.Path})
-			changedPaths = append(changedPaths, c.Path)
-		case "deleted":
-			out.Removed = append(out.Removed, DiffPath{Path: c.Path})
+		switch syn.ChangeType(c.Type) { // tolerate legacy string types
+		case syn.Added:
+			out.Added = append(out.Added, DiffPath{Path: toSlash(c.Path)})
+		case syn.Modified:
+			out.Changed = append(out.Changed, DiffPath{Path: toSlash(c.Path)})
+			changedPaths = append(changedPaths, toSlash(c.Path))
+		case syn.Deleted:
+			out.Removed = append(out.Removed, DiffPath{Path: toSlash(c.Path)})
+		default:
+			// ignore unknown types (future-proof)
 		}
 	}
 
@@ -64,6 +68,7 @@ func BuildDiffJSON(
 		out.Logical = logical
 	}
 
+	// Deterministic ordering
 	sort.Slice(out.Added, func(i, j int) bool { return out.Added[i].Path < out.Added[j].Path })
 	sort.Slice(out.Changed, func(i, j int) bool { return out.Changed[i].Path < out.Changed[j].Path })
 	sort.Slice(out.Removed, func(i, j int) bool { return out.Removed[i].Path < out.Removed[j].Path })
@@ -83,12 +88,13 @@ func enrichALS(
 	if alsRel == "" {
 		return nil, nil
 	}
+	alsRel = toSlash(alsRel)
 
 	// Only if ALS changed or there's no previous ALS in cache.
 	alsChanged := cached[alsRel] == ""
 	if !alsChanged {
 		for _, p := range changedPaths {
-			if filepath.Clean(p) == filepath.Clean(alsRel) {
+			if toSlash(filepath.Clean(p)) == alsRel {
 				alsChanged = true
 				break
 			}
@@ -107,27 +113,34 @@ func enrichALS(
 	var prevXML []byte
 	if prevSHA := cached[alsRel]; prevSHA != "" {
 		key := BuildR2Key(projectName, alsRel, prevSHA)
-		var buf bytes.Buffer
-		if err := blobs.DownloadTo(ctx, key, &buf); err == nil {
-			// buf contains gzipped ALS
-			if gr, err := gzip.NewReader(bytes.NewReader(buf.Bytes())); err == nil {
+		var gz bytes.Buffer
+		// Best-effort download; ignore errors and proceed without prevXML.
+		if err := blobs.DownloadTo(ctx, key, &gz); err == nil {
+			// Decompress with a safety cap (e.g., 50MB)
+			const maxALS = 50 << 20
+			gr, err := gzip.NewReader(bytes.NewReader(gz.Bytes()))
+			if err == nil {
 				defer gr.Close()
-				prevXML, _ = io.ReadAll(gr) // ok if it fails; we just skip prevXML
+				limited := io.LimitReader(gr, maxALS+1)
+				b, _ := io.ReadAll(limited)
+				if int64(len(b)) <= maxALS {
+					prevXML = b
+				}
 			}
 		}
 	}
 
 	// prev sample hash lookup from cached manifest
 	prevHash := func(rel string) string {
-		rel = filepath.ToSlash(filepath.Clean(rel))
-		if h, ok := cached[rel]; ok {
+		key := toSlash(filepath.Clean(rel))
+		if h, ok := cached[key]; ok {
 			return h
 		}
 		return ""
 	}
 
 	// current ALS path on disk (gz)
-	currALSPath := filepath.Join(projectPath, alsRel)
+	currALSPath := filepath.Join(projectPath, filepath.FromSlash(alsRel))
 
 	return ComputeALSLogicalDiff(prevXML, currALSPath, projectPath, prevHash)
 }
@@ -140,7 +153,8 @@ func topLevelALS(manifest map[string]string) string {
 			continue
 		}
 		dir := filepath.Dir(p)
-		if dir != "." && dir != "" {
+
+		if dir != "." && dir != "" && dir != "/" && dir != `\` {
 			continue // ignore subfolders like Backup/
 		}
 		// prefer the lexicographically first if multiple
@@ -148,5 +162,13 @@ func topLevelALS(manifest map[string]string) string {
 			candidate = p
 		}
 	}
-	return filepath.ToSlash(candidate)
+	return toSlash(candidate)
+}
+
+// toSlash normalizes path separators to forward slashes for map keys / JSON.
+func toSlash(p string) string {
+	if p == "" {
+		return p
+	}
+	return filepath.ToSlash(p)
 }

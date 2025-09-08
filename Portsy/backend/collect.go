@@ -1,6 +1,7 @@
 package backend
 
 import (
+	corehash "Portsy/backend/internal/core/hash"
 	"bufio"
 	"bytes"
 	"compress/gzip"
@@ -16,12 +17,25 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	stdruntime "runtime"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-	"github.com/wailsapp/wails/v2/pkg/runtime"
+	wruntime "github.com/wailsapp/wails/v2/pkg/runtime"
+)
+
+var (
+	reAudioExt = `(?i)\.(wav|aif|aiff|flac|mp3|ogg)`
+	reURI      = regexp.MustCompile(`file://(?:localhost/)?(?:[A-Za-z]:/|/)[^"<>\s]+` + reAudioExt)
+	reWinAbs   = regexp.MustCompile(`[A-Za-z]:\\[^"<>\r\n]+` + reAudioExt)
+	reRel      = regexp.MustCompile(`(?:^|[/"'=])(?:\.?/)?(?:Samples/[^"'\r\n]+` + reAudioExt + `)`)
+	reFileRef  = regexp.MustCompile(`(?is)<FileRef[^>]*>.*?</FileRef>`)
+	reFRAbs    = regexp.MustCompile(`(?i)AbsolutePath\s+Value="([^"]+` + reAudioExt + `)"`)
+	reFRURL    = regexp.MustCompile(`(?i)Url\s+Value="(file:[^"]+)"`)
+	reFRRel    = regexp.MustCompile(`(?i)(?:RelativePath|Path)\s+Value="([^"]+)"`)
+	reFRName   = regexp.MustCompile(`(?i)(?:FileName|Name)\s+Value="([^"]+` + reAudioExt + `)"`)
 )
 
 type ALSLogicalDiff struct {
@@ -45,7 +59,7 @@ type HashLookup func(relPath string) string
 // - projectRoot: needed to resolve realtive sample paths and hash current sample files.
 // - prevHash: lookup function to get previous content hash for a sample rel path (from your last commit manifest)
 func ComputeALSLogicalDiff(prevALS []byte, currALSPath, projectRoot string, prevHash HashLookup) (*ALSLogicalDiff, error) {
-	currXML, err := readALSXML(currALSPath)
+	currXML, err := ungzipALS(currALSPath)
 	if err != nil {
 		return nil, err
 	}
@@ -148,6 +162,9 @@ func normalizeRelPaths(paths []string, projectRoot string) []string {
 			// keep as-is if not under project (still useful for UI)
 			pp = filepath.ToSlash(pp)
 		}
+		if stdruntime.GOOS == "windows" {
+			pp = strings.ToLower(pp)
+		}
 		if _, ok := seen[pp]; ok {
 			continue
 		}
@@ -156,6 +173,29 @@ func normalizeRelPaths(paths []string, projectRoot string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func alreadyImported(importDir, srcHash string) bool {
+	entries, err := os.ReadDir(importDir)
+	if err != nil {
+		return false
+	}
+	checked := 0
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		// Don’t scan the whole folder on huge dirs.
+		if checked > 200 {
+			break
+		}
+		checked++
+		p := filepath.Join(importDir, e.Name())
+		if h, err := fileSHA256(p); err == nil && h == srcHash {
+			return true
+		}
+	}
+	return false
 }
 
 func midiNotesHashes(xmlBytes []byte) map[string]string {
@@ -243,40 +283,17 @@ func midiNotesHashes(xmlBytes []byte) map[string]string {
 	return out
 }
 
-func readALSXML(currAlsGzPath string) ([]byte, error) {
-	f, err := os.Open(currAlsGzPath)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	gr, err := gzip.NewReader(f)
-	if err != nil {
-		return nil, err
-	}
-	defer gr.Close()
-	return io.ReadAll(gr)
-}
-
-func toSet(xs []string) map[string]struct{} {
-	m := make(map[string]struct{}, len(xs))
-	for _, x := range xs {
-		m[x] = struct{}{}
-	}
-	return m
-}
-
 func hashCurrentSample(projectRoot, relOrAbs string) string {
 	// resolve rel to abs under projectRoot
 	p := relOrAbs
 	if !filepath.IsAbs(p) {
 		p = filepath.Join(projectRoot, filepath.FromSlash(relOrAbs))
 	}
-	b, err := os.ReadFile(p)
+	h, err := corehash.FileHash(p)
 	if err != nil {
 		return ""
 	}
-	sum := sha256.Sum256(b)
-	return hex.EncodeToString(sum[:])
+	return h
 }
 
 // CollectNewSamples:
@@ -345,6 +362,11 @@ func CollectNewSamples(ctx context.Context, projectPath, alsPath string) ([]stri
 			continue
 		}
 
+		if alreadyImported(importDir, srcHash) {
+			seenHash[srcHash] = struct{}{}
+			continue
+		}
+
 		destBase := filepath.Base(abs)
 		destPath := filepath.Join(importDir, destBase)
 
@@ -393,26 +415,17 @@ func ungzipALS(alsPath string) ([]byte, error) {
 //   - relative "Samples/..." paths
 func extractSamplePaths(xml []byte) []string {
 	text := string(xml)
-	exts := `(?i)\.(wav|aif|aiff|flac|mp3|ogg)`
-
 	uniq := map[string]struct{}{}
 	add := func(p string) {
-		p = strings.TrimSpace(p)
-		p = strings.Trim(p, `"'`)
+		p = strings.TrimSpace(strings.Trim(p, `"'`))
 		if p == "" {
 			return
 		}
-		// normalize slashes; we'll absolutize later
 		p = strings.ReplaceAll(p, `\`, string(filepath.Separator))
-		// keep forward slashes for rel paths; Join will handle them
-		if _, ok := uniq[p]; !ok {
-			uniq[p] = struct{}{}
-		}
+		uniq[p] = struct{}{}
 	}
 
-	// 1) file:// and file://localhost URLs
-	rURI := regexp.MustCompile(`file://(?:localhost/)?(?:[A-Za-z]:/|/)[^"<>\s]+` + exts)
-	for _, m := range rURI.FindAllString(text, -1) {
+	for _, m := range reURI.FindAllString(text, -1) {
 		u := strings.TrimPrefix(m, "file://")
 		u = strings.TrimPrefix(u, "localhost/")
 		if dec, err := url.PathUnescape(u); err == nil {
@@ -420,35 +433,21 @@ func extractSamplePaths(xml []byte) []string {
 		}
 		add(u)
 	}
-
-	// 2) Absolute Windows paths
-	rWin := regexp.MustCompile(`[A-Za-z]:\\[^"<>\r\n]+` + exts)
-	for _, m := range rWin.FindAllString(text, -1) {
+	for _, m := range reWinAbs.FindAllString(text, -1) {
 		add(m)
 	}
-
-	// 3) Relative "Samples/..." (also allow ./Samples/...)
-	rRel := regexp.MustCompile(`(?:^|[/"'=])(?:\.?/)?(?:Samples/[^"'\r\n]+` + exts + `)`)
-	for _, m := range rRel.FindAllString(text, -1) {
+	for _, m := range reRel.FindAllString(text, -1) {
 		m = strings.TrimLeft(m, `"'=/`)
 		m = strings.TrimPrefix(m, "./")
 		add(m)
 	}
-
-	// 4) <FileRef> blocks (Ableton's main schema)
-	rBlock := regexp.MustCompile(`(?is)<FileRef[^>]*>.*?</FileRef>`)
-	blocks := rBlock.FindAllString(text, -1)
-	if len(blocks) > 0 {
-		reAbs := regexp.MustCompile(`(?i)AbsolutePath\s+Value="([^"]+` + exts + `)"`)
-		reUrl := regexp.MustCompile(`(?i)Url\s+Value="(file:[^"]+)"`)
-		reRelAttr := regexp.MustCompile(`(?i)(?:RelativePath|Path)\s+Value="([^"]+)"`)
-		reName := regexp.MustCompile(`(?i)(?:FileName|Name)\s+Value="([^"]+` + exts + `)"`)
+	if blocks := reFileRef.FindAllString(text, -1); len(blocks) > 0 {
 		for _, b := range blocks {
-			if m := reAbs.FindStringSubmatch(b); m != nil {
+			if m := reFRAbs.FindStringSubmatch(b); m != nil {
 				add(m[1])
 				continue
 			}
-			if m := reUrl.FindStringSubmatch(b); m != nil {
+			if m := reFRURL.FindStringSubmatch(b); m != nil {
 				u := strings.TrimPrefix(m[1], "file://")
 				u = strings.TrimPrefix(u, "localhost/")
 				if dec, err := url.PathUnescape(u); err == nil {
@@ -457,27 +456,20 @@ func extractSamplePaths(xml []byte) []string {
 				add(u)
 			}
 			var rel string
-			if m := reRelAttr.FindStringSubmatch(b); m != nil {
+			if m := reFRRel.FindStringSubmatch(b); m != nil {
 				rel = m[1]
 			}
-			if m := reName.FindStringSubmatch(b); m != nil {
-				if rel != "" {
-					// avoid double slashes
-					sep := "/"
-					if strings.HasSuffix(rel, "/") || strings.HasSuffix(rel, `\`) {
-						sep = ""
-					}
-					add(rel + sep + m[1])
-				} else {
-					add(m[1])
+			if m := reFRName.FindStringSubmatch(b); m != nil {
+				sep := ""
+				if rel != "" && !(strings.HasSuffix(rel, "/") || strings.HasSuffix(rel, `\`)) {
+					sep = "/"
 				}
-			} else if rel != "" && regexp.MustCompile(exts+`$`).MatchString(rel) {
-				// Relative path already includes filename
+				add(rel + sep + m[1])
+			} else if rel != "" && regexp.MustCompile(reAudioExt+`$`).MatchString(rel) {
 				add(rel)
 			}
 		}
 	}
-
 	out := make([]string, 0, len(uniq))
 	for p := range uniq {
 		out = append(out, p)
@@ -520,17 +512,7 @@ func copyFile(src, dst string) error {
 }
 
 func fileSHA256(p string) (string, error) {
-	f, err := os.Open(p)
-	if err != nil {
-		return "", err
-	}
-	defer f.Close()
-
-	h := sha256.New()
-	if _, err := io.Copy(h, f); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	return corehash.FileHash(p)
 }
 
 func isSubpath(child, parent string) bool {
@@ -538,8 +520,11 @@ func isSubpath(child, parent string) bool {
 	if err != nil {
 		return false
 	}
-	// rel == "." or a nested path means it's inside parent
-	return rel != ".." && !strings.HasPrefix(rel, fmt.Sprintf("..%c", filepath.Separator))
+	if rel == ".." {
+		return false
+	}
+	prefix := ".." + string(filepath.Separator)
+	return !strings.HasPrefix(rel, prefix)
 }
 
 // WatchAllProjects watches 'root' for any immediate child folder that contains a top-level .als.
@@ -570,7 +555,7 @@ func WatchAllProjects(
 			return
 		}
 		name := filepath.Base(projectPath)
-		runtime.EventsEmit(ctx, "log", fmt.Sprintf("[WatchAll] start %s (%s)", name, projectPath))
+		wruntime.EventsEmit(ctx, "log", fmt.Sprintf("[WatchAll] start %s (%s)", name, projectPath))
 		log.Printf("[WatchAll] start %s (%s)", name, projectPath)
 
 		cctx, cancel := context.WithCancel(ctx)
@@ -578,7 +563,7 @@ func WatchAllProjects(
 		go func() {
 			err := WatchProjectALS(cctx, name, projectPath, debounce, onSave)
 			log.Printf("[WatchAll] WatchProjectALS exit %s err=%v", name, err)
-			runtime.EventsEmit(ctx, "log", fmt.Sprintf("[WatchAll] WatchProjectALS exit %s err=%v", name, err))
+			wruntime.EventsEmit(ctx, "log", fmt.Sprintf("[WatchAll] WatchProjectALS exit %s err=%v", name, err))
 		}()
 	}
 
@@ -590,7 +575,7 @@ func WatchAllProjects(
 	}
 
 	// DEBUG_________________________________
-	runtime.EventsEmit(ctx, "log", "[WatchAll] initial scan complete")
+	wruntime.EventsEmit(ctx, "log", "[WatchAll] initial scan complete")
 
 	// Debounced rescan on root changes
 	var rescanT *time.Timer
@@ -607,7 +592,7 @@ func WatchAllProjects(
 		})
 	}
 
-	runtime.EventsEmit(ctx, "log", "[WatchAll] rescan triggered")
+	wruntime.EventsEmit(ctx, "log", "[WatchAll] rescan triggered")
 
 	for {
 		select {
@@ -618,16 +603,14 @@ func WatchAllProjects(
 			return ctx.Err()
 		case ev := <-w.Events:
 			// Any creation/rename of an .als one level below the root triggers rescan
-			if strings.EqualFold(filepath.Ext(ev.Name), ".als") {
-				parent := filepath.Dir(ev.Name)
-				if filepath.Dir(parent) == root {
-					rescan()
-				}
-			} else if ev.Op&(fsnotify.Create|fsnotify.Rename) != 0 {
-				// new folder under root - rescan
-				if filepath.Dir(ev.Name) == root {
-					rescan()
-				}
+			if strings.EqualFold(filepath.Ext(ev.Name), ".als") && filepath.Dir(filepath.Dir(ev.Name)) == root {
+				rescan()
+				continue
+
+			}
+
+			if ev.Op&(fsnotify.Create|fsnotify.Rename|fsnotify.Write) != 0 && filepath.Dir(ev.Name) == root {
+				rescan()
 			}
 		case err := <-w.Errors:
 			if err != nil {
@@ -655,4 +638,12 @@ func findProjectsUnderRoot(root string) ([]string, error) {
 		}
 	}
 	return out, nil
+}
+
+func toSet(xs []string) map[string]struct{} {
+	m := make(map[string]struct{}, len(xs))
+	for _, x := range xs {
+		m[x] = struct{}{}
+	}
+	return m
 }

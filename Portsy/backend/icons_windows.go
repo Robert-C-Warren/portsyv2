@@ -5,45 +5,67 @@ package backend
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"strings"
+
+	"golang.org/x/sys/windows"
 )
 
 func EnsureAbletonFolderIcon(projectPath string) error {
-	// Accept either desktop.ini or Desktop.ini
-	var iniPath string
-	for _, name := range []string{"desktop.ini", "Desktop.ini"} {
-		p := filepath.Join(projectPath, name)
-		if _, err := os.Stat(p); err == nil {
-			iniPath = p
-			break
-		}
-	}
-	ico := filepath.Join(projectPath, "Ableton Project Info", "AProject.ico")
+	projectPath = filepath.Clean(projectPath)
 
-	// If no desktop.ini but the icon exists, write a minimal ini
-	if iniPath == "" {
-		if _, err := os.Stat(ico); err != nil {
-			// No icon available; nothing to do
+	// Default icon location inside the project
+	iconRel := filepath.Join("Ableton Project Info", "AProject.ico")
+	iconPath := filepath.Join(projectPath, iconRel)
+
+	// If no icon exists, nothing to do.
+	if _, err := os.Stat(iconPath); err != nil {
+		if os.IsNotExist(err) {
 			return nil
 		}
-		iniPath = filepath.Join(projectPath, "desktop.ini")
-		body := strings.Join([]string{
-			"[.ShellClassInfo]",
-			"IconFile=Ableton Project Info\\AProject.ico",
-			"IconIndex=0",
-			"ConfirmFileOp=0",
-			"NoSharing=0",
-			"", // Trailing new line
-		}, "\r\n")
-		if err := os.WriteFile(iniPath, []byte(body), 0644); err != nil {
+		return fmt.Errorf("stat icon: %w", err)
+	}
+
+	// Ensure desktop.ini exists with the right contents.
+	iniPath := filepath.Join(projectPath, "desktop.ini")
+	content := []byte(fmt.Sprintf(`[.ShellClassInfo]
+	IconResource=%s,0
+	IconFile=%s
+	IconIndex=0
+	`, filepath.ToSlash(iconRel), filepath.ToSlash(iconRel)))
+
+	// Write or update desktop.ini only if needed.
+	needWrite := true
+	if b, err := os.ReadFile(iniPath); err == nil && string(b) == string(content) {
+		needWrite = false
+	}
+	if needWrite {
+		if err := os.WriteFile(iniPath, content, 0o644); err != nil {
 			return fmt.Errorf("write desktop.ini: %w", err)
 		}
 	}
 
-	// Mark the folder as System and the ini as Hidden+System
-	_ = exec.Command("attrib", "+s", projectPath).Run()
-	_ = exec.Command("attrib", "+h", "+s", iniPath).Run()
+	// Set attributes:
+	// - Folder must have SYSTEM for Windows to honor desktop.ini customization.
+	// - desktop.ini should be HIDDEN | SYSTEM | READONLY (conventional).
+	if err := setFileAttrs(projectPath, windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_SYSTEM); err != nil {
+		return fmt.Errorf("set folder attrs: %w", err)
+	}
+	if err := setFileAttrs(iniPath, windows.FILE_ATTRIBUTE_HIDDEN|windows.FILE_ATTRIBUTE_SYSTEM|windows.FILE_ATTRIBUTE_READONLY); err != nil {
+		return fmt.Errorf("set desktop.ini attrs: %w", err)
+	}
+
 	return nil
+}
+
+func setFileAttrs(path string, attrs uint32) error {
+	p, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		return err
+	}
+	// Preserve existing attributes, OR with declared ones
+	existing, err := windows.GetFileAttributes(p)
+	if err != nil {
+		return err
+	}
+	return windows.SetFileAttributes(p, existing|attrs)
 }

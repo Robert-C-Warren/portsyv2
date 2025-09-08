@@ -30,29 +30,33 @@ type DetectChangesResp struct {
 	SampleRefs []string               `json:"sampleRefs"`
 }
 
-// DetectChanges scans & diffs, emits events, returns details.
+// DetectChanges scans & diffs, emits coarse events, returns details.
 func (a *API) DetectChanges(ctx context.Context, projectRoot string) (*DetectChangesResp, error) {
 	// prefer stored ctx for events/logs (Wails runtime is tied to startup ctx)
 	if a.ctx == nil {
 		a.ctx = ctx
 	}
 
-	runtime.LogInfof(a.ctx, "[diff] start projectRoot=%s", projectRoot)
-	runtime.EventsEmit(a.ctx, "diff:status", map[string]any{
+	runtime.LogInfof(a.ctx, "[detect] start projectRoot=%s", projectRoot)
+	runtime.EventsEmit(a.ctx, "detect:status", map[string]any{
 		"phase":     "start",
-		"projectId": projectRoot, // you can swap to projectID if you have one
+		"projectId": projectRoot, // swap to stable projectID when available
 		"ts":        time.Now().UTC().Format(time.RFC3339),
 	})
 
-	// Load baseline hashmap (ignore if missing)
+	// Load baseline hashmap (ignore if file missing; log other errors)
 	baseline := make(map[string]string)
-	_ = readJSON(filepath.Join(projectRoot, ".portsy", "hashmap.json"), &baseline)
+	if err := readJSON(filepath.Join(projectRoot, ".portsy", "hashmap.json"), &baseline); err != nil {
+		if !os.IsNotExist(err) {
+			runtime.LogErrorf(a.ctx, "[detect] read hashmap: %v", err)
+		}
+	}
 
 	// Scan filesystem
 	entries, err := scan.WalkProject(projectRoot, nil)
 	if err != nil {
-		runtime.LogErrorf(a.ctx, "[diff] scan error: %v", err)
-		runtime.EventsEmit(a.ctx, "diff:status", map[string]any{
+		runtime.LogErrorf(a.ctx, "[detect] scan error: %v", err)
+		runtime.EventsEmit(a.ctx, "detect:status", map[string]any{
 			"phase":     "error",
 			"projectId": projectRoot,
 			"error":     err.Error(),
@@ -66,8 +70,8 @@ func (a *API) DetectChanges(ctx context.Context, projectRoot string) (*DetectCha
 	for _, e := range entries {
 		h, err := hash.FileHash(e.Abs)
 		if err != nil {
-			runtime.LogErrorf(a.ctx, "[diff] hashing error on %s: %v", e.Rel, err)
-			runtime.EventsEmit(a.ctx, "diff:status", map[string]any{
+			runtime.LogErrorf(a.ctx, "[detect] hashing error on %s: %v", e.Rel, err)
+			runtime.EventsEmit(a.ctx, "detect:status", map[string]any{
 				"phase":     "error",
 				"projectId": projectRoot,
 				"error":     err.Error(),
@@ -92,17 +96,20 @@ func (a *API) DetectChanges(ctx context.Context, projectRoot string) (*DetectCha
 	}
 	cs.SampleRefs = dedupe(refs)
 
-	// Build a compact summary for the UI badge
-	sum := SummaryFromChangeSet(projectRoot, cs)
+	// Coarse completion event (no badge summary)
+	added := cs.Counts[syn.Added]
+	modified := cs.Counts[syn.Modified]
+	deleted := cs.Counts[syn.Deleted]
 
-	runtime.LogInfof(a.ctx, "[diff] done added=%d modified=%d deleted=%d",
-		len(sum.Added), len(sum.Modified), len(sum.Deleted))
-
-	// Push an event the Svelte side can listen for
-	runtime.EventsEmit(a.ctx, "diff:status", map[string]any{
+	runtime.LogInfof(a.ctx, "[detect] done added=%d modified=%d deleted=%d", added, modified, deleted)
+	runtime.EventsEmit(a.ctx, "detect:status", map[string]any{
 		"phase":     "done",
-		"projectId": sum.ProjectID,
-		"summary":   sum,
+		"projectId": projectRoot,
+		"counts": map[string]int{
+			string(syn.Added):    added,
+			string(syn.Modified): modified,
+			string(syn.Deleted):  deleted,
+		},
 	})
 
 	return &DetectChangesResp{

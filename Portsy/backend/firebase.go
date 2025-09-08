@@ -25,8 +25,10 @@ type MetaStoreConfig struct {
 }
 
 func NewMetaStore(ctx context.Context, cfg MetaStoreConfig) (*MetaStore, error) {
-	var client *firestore.Client
-	var err error
+	var (
+		client *firestore.Client
+		err    error
+	)
 
 	if cfg.ServiceAccountKey != "" {
 		client, err = firestore.NewClient(ctx, cfg.GCPProjectID, option.WithCredentialsFile(cfg.ServiceAccountKey))
@@ -57,20 +59,21 @@ func (m *MetaStore) UpsertLatestState(ctx context.Context, projectName string, s
 	// MergeAll REQUIRES a map, not a struct.
 	if _, err := p.Set(ctx, map[string]interface{}{
 		"Name":         projectName,
+		"NameLower":    strings.ToLower(projectName),
 		"LastCommitID": commit.ID,
 		"LastCommitAt": commit.Timestamp,
 	}, firestore.MergeAll); err != nil {
-		return err
+		return fmt.Errorf("upsert project header: %w", err)
 	}
 
 	// New commit doc — no merge needed.
 	if _, err := p.Collection("commits").Doc(commit.ID).Set(ctx, commit); err != nil {
-		return err
+		return fmt.Errorf("set commit %s: %w", commit.ID, err)
 	}
 
 	// Snapshot for that commit.
 	if _, err := p.Collection("states").Doc(commit.ID).Set(ctx, state); err != nil {
-		return err
+		return fmt.Errorf("set state %s: %w", commit.ID, err)
 	}
 	return nil
 }
@@ -82,11 +85,12 @@ func (m *MetaStore) GetLatestState(ctx context.Context, projectName string) (*Pr
 		if status.Code(err) == codes.NotFound {
 			return nil, nil, nil
 		}
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("get project %q: %w", projectName, err)
 	}
+
 	var pd ProjectDoc
 	if err := doc.DataTo(&pd); err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("decode project doc: %w", err)
 	}
 	if pd.LastCommitID == "" {
 		return nil, nil, nil
@@ -94,26 +98,28 @@ func (m *MetaStore) GetLatestState(ctx context.Context, projectName string) (*Pr
 
 	cdoc, err := p.Collection("commits").Doc(pd.LastCommitID).Get(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("get commit %s: %w", pd.LastCommitID, err)
 	}
+
 	var cm CommitMeta
 	if err := cdoc.DataTo(&cm); err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("decode commit %s: %w", pd.LastCommitID, err)
 	}
 
 	sdoc, err := p.Collection("states").Doc(pd.LastCommitID).Get(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("get state %s: %w", pd.LastCommitID, err)
 	}
+
 	var st ProjectState
 	if err := sdoc.DataTo(&st); err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("decode state %s: %w", pd.LastCommitID, err)
 	}
 	return &st, &cm, nil
 }
 
 func (m *MetaStore) ListProjects(ctx context.Context) ([]ProjectDoc, error) {
-	iter := m.client.Collection("projects").Documents(ctx)
+	iter := m.client.Collection("projects").OrderBy("NameLower", firestore.Asc).Documents(ctx)
 	defer iter.Stop()
 
 	var out []ProjectDoc
@@ -123,14 +129,15 @@ func (m *MetaStore) ListProjects(ctx context.Context) ([]ProjectDoc, error) {
 			break
 		}
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("list projects: %w", err)
 		}
 		var pd ProjectDoc
 		if err := d.DataTo(&pd); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("decode project: %w", err)
 		}
 		out = append(out, pd)
 	}
+	// Client side stable sort as a fallback.
 	sort.Slice(out, func(i, j int) bool {
 		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
 	})
@@ -149,14 +156,20 @@ func (m *MetaStore) BeginCommit(ctx context.Context, projectName string, commit 
 	b := m.client.Batch()
 
 	// Ensure the project doc exists (merge so we don't clobber fields)
-	b.Set(p, map[string]any{"name": projectName}, firestore.MergeAll)
+	b.Set(p, map[string]any{
+		"Name":      projectName,
+		"NameLower": strings.ToLower(projectName),
+	}, firestore.MergeAll)
 
 	// Stash commit + state under subcollections
 	b.Set(p.Collection("commits").Doc(commit.ID), commit)
 	b.Set(p.Collection("states").Doc(commit.ID), state)
 
 	_, err := b.Commit(ctx)
-	return err
+	if err != nil {
+		return fmt.Errorf("begin commit %s: %w", commit.ID, err)
+	}
+	return nil
 }
 
 // FinalizeCommit verifies blobs exist (outside tx), then atomically:
@@ -168,12 +181,12 @@ func (m *MetaStore) FinalizeCommit(
 	projectName string,
 	commit CommitMeta,
 	state ProjectState,
-	verify func(context.Context, string) error, // verify(ctx, sha256Hex)
+	verify func(context.Context, string) error, // verify(ctx, contentHashHex)
 ) error {
 	// 1) Verify every file's blob exists in R2 BEFORE touching Firestore.
 	for _, fe := range state.Files {
 		if err := verify(ctx, fe.Hash); err != nil {
-			return fmt.Errorf("verify %s: %w", fe.Hash, err)
+			return fmt.Errorf("verify blob %s: %w", fe.Hash, err)
 		}
 	}
 
@@ -190,10 +203,10 @@ func (m *MetaStore) FinalizeCommit(
 			if status.Code(err) == codes.NotFound {
 				proj = ProjectDoc{Name: projectName}
 			} else {
-				return err
+				return fmt.Errorf("tx get project: %w", err)
 			}
 		} else if err := snap.DataTo(&proj); err != nil {
-			return err
+			return fmt.Errorf("tx decode project: %w", err)
 		}
 
 		// Prepare the final commit
@@ -204,10 +217,10 @@ func (m *MetaStore) FinalizeCommit(
 
 		// WRITE (no reads after this point)
 		if err := tx.Set(commits.Doc(commit.ID), commit); err != nil {
-			return err
+			return fmt.Errorf("tx set commit: %w", err)
 		}
 		if err := tx.Set(states.Doc(commit.ID), state); err != nil {
-			return err
+			return fmt.Errorf("tx set state: %w", err)
 		}
 
 		// Advance HEAD + roll Last5 (IDs only)
@@ -224,7 +237,7 @@ func (m *MetaStore) FinalizeCommit(
 
 		// Upsert the project doc
 		if err := tx.Set(p, proj); err != nil {
-			return err
+			return fmt.Errorf("tx set project: %w", err)
 		}
 		return nil
 	})
@@ -233,6 +246,7 @@ func (m *MetaStore) FinalizeCommit(
 func (m *MetaStore) GetCommitHistory(ctx context.Context, projectName string, limit int) ([]CommitMeta, error) {
 	iter := m.client.Collection("projects").Doc(projectName).
 		Collection("commits").OrderBy("Timestamp", firestore.Desc).Limit(limit).Documents(ctx)
+	defer iter.Stop()
 
 	var commits []CommitMeta
 	for {
@@ -241,11 +255,11 @@ func (m *MetaStore) GetCommitHistory(ctx context.Context, projectName string, li
 			if err == iterator.Done {
 				break
 			}
-			return nil, err
+			return nil, fmt.Errorf("iterate commits: %w", err)
 		}
 		var cm CommitMeta
 		if err := d.DataTo(&cm); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("decode commite: %w", err)
 		}
 		commits = append(commits, cm)
 	}
@@ -258,20 +272,20 @@ func (m *MetaStore) GetStateByCommit(ctx context.Context, projectName, commitID 
 
 	cdoc, err := p.Collection("commits").Doc(commitID).Get(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("get commit %s: %w", commitID, err)
 	}
 	var cm CommitMeta
 	if err := cdoc.DataTo(&cm); err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("decode commit %s: %w", commitID, err)
 	}
 
 	sdoc, err := p.Collection("states").Doc(commitID).Get(ctx)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("get state %s: %w", commitID, err)
 	}
 	var st ProjectState
 	if err := sdoc.DataTo(&st); err != nil {
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("decode state %s: %w", commitID, err)
 	}
 	return &st, &cm, nil
 }
