@@ -35,13 +35,21 @@
 	let watching = false;
 	let commitMsg = "";
 	let autoPush = false;
+	$: selectedProjectKey = (selectedProject || "").trim().toLowerCase();
+	$: trimmedMsg = (commitMsg || "").trim();
+	$: canPush = !!root && !!selectedProject && trimmedMsg.length > 0 && trimmedMsg.length <= 500;
 
 	async function applyAutoPush(v) {
 		autoPush = v;
 		if (watching && root) {
-			// ✅ remove the ':' after await
-			await StopWatcherAll();
-			await StartWatcherAll(root, autoPush);
+			try {
+				await StopWatcherAll();
+				await StartWatcherAll(root, autoPush);
+				watching = true;
+			} catch (e) {
+				watching = false;
+				logStore.error(`Watcher restart failed: ${e.message || e}`);
+			}
 		}
 	}
 
@@ -59,28 +67,16 @@
 	}
 
 	function show(s) {
-		log = typeof s === "string" ? s : JSON.stringify(s, null, 2);
+		const text = typeof s === "string" ? s : JSON.stringify(s, null, 2);
+		logStore.debug(text, selectedProject || root || "app");
 	}
 
 	async function pickRoot() {
 		const dir = await PickRoot();
 		if (!dir) return;
 
-		// Preflight: ask before scanning very large roots or drive roots
-		try {
-			const stats = await RootStats(dir); // { dirCount, isDriveRoot }
-			const LIMIT = 800; // tweak to taste; we only scan first level anyway
-
-			if (stats.isDriveRoot || stats.dirCount > LIMIT) {
-				const ok = confirm(`That folder looks large (${stats.dirCount} subfolders${stats.isDriveRoot ? ", drive root" : ""}). ` + `Portsy scans only the first level for Ableton projects. Proceed?`);
-				if (!ok) return;
-			}
-		} catch (e) {
-			// If stats fails, we can still proceed—the scanner is first-level only.
-			console.warn("RootStats failed:", e);
-		}
-
-		// Accept the root + auto-scan
+		// stats check elided
+		const wasWatching = watching;
 		root = dir;
 		selectedProject = "";
 		diff = [];
@@ -90,13 +86,16 @@
 		await loadProjects();
 		await loadPending();
 
-		// If watching was on previously, require the user to toggle it again (stays off for safety)
 		if (watching) {
-			await StopWatcherAll();
+			await StartWatcherAll();
 			watching = false;
 		}
 
-		await StartWatcherAll(root, autoPush);
+		if (wasWatching) {
+			await StartWatcherAll(root, autoPush);
+			watching = true;
+			currentTab = "projects";
+		}
 	}
 
 	function normalizeProjects(raw) {
@@ -110,18 +109,24 @@
 			.filter((p) => p.name || p.path);
 	}
 
+	async function safeJSON(res, context) {
+		try {
+			return JSON.parse(res);
+		} catch (e) {
+			const msg = `Malformed ${context} JSON`;
+			logStore.error(`${msg}: ${e.message || e}`);
+			throw new Error(msg);
+		}
+	}
+
 	async function loadProjects() {
 		if (!root) return;
 		try {
 			show(`Scanning root: ${root}`);
-			const res = await ScanJSON(root); // <- Go method via Wails
-			const raw = JSON.parse(res);
+			const raw = await safeJSON(await ScanJSON(root), "scan");
 			projects = normalizeProjects(raw);
-			show(res);
 		} catch (e) {
-			const msg = e?.message || String(e);
-			show(`Scan failed: ${msg}`);
-			console.error("ScanJSON error:", e);
+			show(`Scan failed: ${e?.message || e}`);
 		}
 	}
 
@@ -139,9 +144,9 @@
 	}
 
 	onMount(() => {
-		console.log('[App] onMount -> initDiffBus');
+		console.log("[App] onMount -> initDiffBus");
 		initDiffBus();
-		console.log('[App] diff snapshot at mount:', diffs.debugSnapshot());
+		console.log("[App] diff snapshot at mount:", diffs.debugSnapshot());
 	});
 
 	async function loadDiff() {
@@ -171,13 +176,21 @@
 		return null;
 	}
 
-	async function doPush() {
-		if (!canPush) return;
-		const res = await Push(root, selectedProject, commitMsg);
-		show(res || "pushed");
-		commitMsg = "";
-		await loadPending();
-		await loadDiff();
+	async function doPush(message) {
+		const msg = message ?? trimmedMsg;
+		if (!root || !selectedProject || msg.length === 0 || msg.length > 500) return;
+
+		try {
+			const res = await Push(root, selectedProject, msg);
+			logStore.success(`Pushed ${selectedProject}`, selectedProject, { message: msg });
+			show(res || "pushed");
+		} catch (e) {
+			logStore.error(`Push failed: ${e.message || e}`, selectedProject);
+		} finally {
+			commitMsg = "";
+			await loadPending();
+			await loadDiff();
+		}
 	}
 
 	async function toggleWatch() {
@@ -185,14 +198,20 @@
 			watching = false;
 			return;
 		}
-		if (!watching) {
-			await StartWatcherAll(root, autoPush);
-			watching = true;
-		} else {
-			await StopWatcherAll();
+		try {
+			if (!watching) {
+				await StartWatcherAll(root, autoPush);
+				watching = true;
+			} else {
+				await StopWatcherAll();
+				watching = false;
+			}
+		} catch (e) {
 			watching = false;
+			logStore.error(`Watcher toggle failed: ${e?.message || e}`);
 		}
 	}
+
 	// Derived state
 	$: canPush = !!root && !!selectedProject && commitMsg.trim().length > 0 && commitMsg.length <= 500;
 
@@ -238,9 +257,14 @@
 		});
 	});
 
-	onDestroy(() => {
+	onDestroy(async () => {
 		offSaved?.();
 		offPushed?.();
+		if (watching) {
+			try {
+				await StopWatcherAll();
+			} catch {}
+		}
 	});
 
 	function normalizeProjectDiff(slice, projectName) {
@@ -277,6 +301,12 @@
 
 		return { project: projectName, changedCount: files.length, files };
 	}
+
+	let diffTimer;
+	function scheduleLoadDiff() {
+		clearTimeout(diffTimer);
+		diffTimer = setTimeout(loadDiff, 150);
+	}
 </script>
 
 <div class="shell">
@@ -298,7 +328,7 @@
 			{#if currentTab === "projects"}
 				<div class="muted projects-row">Projects found:</div>
 				<!-- ✅ use Svelte's on:change -->
-				<ProjectSelect {projects} bind:selected={selectedProject} on:change={loadDiff} disabled={!root || projects.length === 0} />
+				<ProjectSelect {projects} bind:selected={selectedProject} on:change={scheduleLoadDiff} disabled={!root || projects.length === 0} />
 				{#if !root}
 					<div class="row projects-row">Choose a root to scan.</div>
 				{:else if projects.length === 0}

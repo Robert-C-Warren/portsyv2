@@ -11,23 +11,21 @@ import (
 	corehash "Portsy/backend/internal/core/hash"
 )
 
-// HashFileSHA256 now delegates to the core hasher (algo configurable there).
-// Returns (hashHex, sizeBytes, mtimeUnixSec).
+// HashFileSHA256 returns (hashHex, sizeBytes, mtimeUnixSec) using SHA-256 ONLY.
 func HashFileSHA256(path string) (string, int64, int64, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return "", 0, 0, err
 	}
-	// Skip directories and symlinks (follow only regular files).
 	if info.IsDir() || (info.Mode()&os.ModeSymlink != 0) {
 		return "", 0, 0, os.ErrInvalid
 	}
 
-	sum, err := corehash.FileHash(path)
+	// force SHA256 (don’t use FileHash, which follows DefaultAlg)
+	sum, err := corehash.New(corehash.SHA256).File(path)
 	if err != nil {
 		return "", 0, 0, err
 	}
-	// Use info we already have (avoid re-Stat after hashing)
 	return sum, info.Size(), info.ModTime().Unix(), nil
 }
 

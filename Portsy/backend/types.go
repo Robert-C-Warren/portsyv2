@@ -15,6 +15,7 @@ type ProjectState struct {
 	ProjectPath string      `json:"projectPath"` // local (for context only)
 	Files       []FileEntry `json:"files"`
 	CreatedAt   int64       `json:"createdAt"`
+	Algo        string      `json:"algo,omitempty"` // sha256 or blake3
 }
 
 // Commit metadata stored in Firestore

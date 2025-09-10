@@ -118,7 +118,10 @@ func (a *App) runCmd(ctx context.Context, args ...string) (string, error) {
 	}
 	runtime.EventsEmit(ctx, "log", fmt.Sprintf("CLI: %s %v", a.cliPath, args))
 
-	cmd := exec.CommandContext(a.ctx, a.cliPath, args...) // args slice preserves spaces in paths
+	if ctx == nil {
+		ctx = a.ctx
+	}
+	cmd := exec.CommandContext(ctx, a.cliPath, args...)
 	var out, errb bytes.Buffer
 	cmd.Stdout, cmd.Stderr = &out, &errb
 	err := cmd.Run()

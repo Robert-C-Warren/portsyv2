@@ -17,6 +17,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/wailsapp/wails/v2 v2.10.2
 	github.com/zeebo/blake3 v0.2.4
+	golang.org/x/sys v0.36.0
 	google.golang.org/api v0.246.0
 	google.golang.org/grpc v1.74.2
 )
@@ -79,7 +80,6 @@ require (
 	golang.org/x/net v0.42.0 // indirect
 	golang.org/x/oauth2 v0.30.0 // indirect
 	golang.org/x/sync v0.16.0 // indirect
-	golang.org/x/sys v0.36.0 // indirect
 	golang.org/x/text v0.27.0 // indirect
 	golang.org/x/time v0.12.0 // indirect
 	google.golang.org/genproto v0.0.0-20250603155806-513f23925822 // indirect

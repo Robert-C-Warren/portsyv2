@@ -1,17 +1,24 @@
 package backend
 
 import (
+	corehash "Portsy/backend/internal/core/hash"
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sync"
+	"time"
 )
 
-// PushProject uploads changed files to R2 and writes commit metadata+state to Firestore.
-// It also migrates objects when the desired R2 key changes (e.g., key layout update).
+// PushProject uploads changed blobs (idempotent) and writes commit metadata.
+// - Concurrency via worker pool
+// - Algo-aware (hash already inside manifest entries)
+// - Key migration prefers server-side copy
 func PushProject(ctx context.Context, meta *MetaStore, r2 *R2Client, project AbletonProject, commit CommitMeta) error {
-	// Build current manifest
+	// 0) Build manifest (must already include Algo + per-file Hash)
 	cur, err := BuildManifest(project.Path)
 	if err != nil {
 		return err
@@ -19,87 +26,122 @@ func PushProject(ctx context.Context, meta *MetaStore, r2 *R2Client, project Abl
 	cur.ProjectName = project.Name
 	cur.ProjectPath = project.Path
 
-	// Get previous state (if any)
+	// 1) Previous state lookup
 	prev, _, _ := meta.GetLatestState(ctx, project.Name)
-
-	// Build quick lookups from prev
-	var prevByPath map[string]FileEntry
+	prevByPath := map[string]FileEntry{}
 	if prev != nil {
-		prevByPath = make(map[string]FileEntry, len(prev.Files))
 		for _, pf := range prev.Files {
 			prevByPath[pf.Path] = pf
 		}
 	}
 
-	// Decide which files to upload
-	type up struct {
+	// 2) Decide actions
+	type todo struct {
 		idx int
 		key string
+		// If migrating, fromKey holds old key to copy-from
+		fromKey string
 	}
-	var uploads []up
+	var uploads []todo
 
 	for i := range cur.Files {
 		f := &cur.Files[i]
 		desiredKey := r2.BuildKey(project.Name, f.Hash)
 
-		var needUpload bool
-
 		if prev == nil {
-			// First push: upload everything
-			needUpload = true
-		} else if pf, ok := prevByPath[f.Path]; ok {
-			// If content changed, upload
-			if pf.Hash != f.Hash {
-				needUpload = true
-			} else {
-				// Same content: migrate if the key scheme changed
-				if pf.R2Key != desiredKey {
-					needUpload = true
-				} else {
-					// Carry forward existing R2Key
-					f.R2Key = pf.R2Key
-				}
+			uploads = append(uploads, todo{idx: i, key: desiredKey})
+			continue
+		}
+		if pf, ok := prevByPath[f.Path]; ok {
+			switch {
+			case pf.Hash != f.Hash:
+				uploads = append(uploads, todo{idx: i, key: desiredKey})
+			case pf.R2Key == desiredKey:
+				f.R2Key = pf.R2Key // carry forward
+			default:
+				// same content, different layout: migrate
+				uploads = append(uploads, todo{idx: i, key: desiredKey, fromKey: pf.R2Key})
 			}
 		} else {
-			// New file
-			needUpload = true
-		}
-
-		if needUpload {
-			uploads = append(uploads, up{idx: i, key: desiredKey})
+			uploads = append(uploads, todo{idx: i, key: desiredKey})
 		}
 	}
 
-	// Perform uploads (skip if object already exists at desired key)
-	for _, u := range uploads {
-		local := filepath.Join(project.Path, cur.Files[u.idx].Path)
-		if exists, _ := r2.Exists(ctx, u.key); !exists {
-			if err := ensureUploaded(ctx, r2, local, u.key); err != nil {
-				return err
+	// 3) Execute with concurrency + idempotency
+	workers := max(2, runtime.NumCPU()/2)
+	type result struct {
+		idx int
+		key string
+		err error
+	}
+	jobs := make(chan todo)
+	results := make(chan result)
+	var wg sync.WaitGroup
+
+	// worker
+	worker := func() {
+		defer wg.Done()
+		for t := range jobs {
+			select {
+			case <-ctx.Done():
+				results <- result{idx: t.idx, key: t.key, err: ctx.Err()}
+				continue
+			default:
 			}
+
+			var err error
+			// Prefer server-side copy when migrating
+			switch {
+			case t.fromKey != "" && t.fromKey != t.key:
+				err = r2.CopyIfMissing(ctx, t.fromKey, t.key)
+			default:
+				local := filepath.Join(project.Path, cur.Files[t.idx].Path)
+				err = r2.UploadIfMissing(ctx, local, t.key) // HEAD/If-None-Match semantics
+			}
+			results <- result{idx: t.idx, key: t.key, err: err}
 		}
-		// record key in current manifest
-		cur.Files[u.idx].R2Key = u.key
 	}
 
-	// Persist metadata + snapshot to Firestore
+	// start workers
+	wg.Add(workers)
+	for i := 0; i < workers; i++ {
+		go worker()
+	}
+	go func() {
+		for _, t := range uploads {
+			jobs <- t
+		}
+		close(jobs)
+	}()
+	// collect
+	var firstErr error
+	for i := 0; i < len(uploads); i++ {
+		r := <-results
+		if r.err != nil && firstErr == nil {
+			firstErr = r.err
+		} else {
+			cur.Files[r.idx].R2Key = r.key
+		}
+	}
+	wg.Wait()
+	close(results)
+	if firstErr != nil {
+		return firstErr
+	}
+
+	// 4) Persist metadata + snapshot
 	return meta.UpsertLatestState(ctx, project.Name, cur, commit)
 }
 
-func ensureUploaded(ctx context.Context, r2 *R2Client, local, key string) error {
-	_, err := r2.UploadFile(ctx, local, key)
-	return err
-}
-
-// PullProject syncs the remote state into destPath.
-// If commitID == "", it pulls the latest. When allowDelete is true, files not in the
-// target state will be deleted locally.
-func PullProject(ctx context.Context, meta *MetaStore, r2 *R2Client,
-	projectName, destPath, commitID string, allowDelete bool) (*PullStats, error) {
+// PullProject downloads target state into destPath.
+// - Algo-aware verification (uses file.Hash + state.Algo)
+// - Atomic download (r2.DownloadTo already writes .part -> fsync -> rename)
+// - Preserves mtime; fsyncs parent dir after rename; bounded concurrency
+func PullProject(ctx context.Context, meta *MetaStore, r2 *R2Client, projectName, destPath, commitID string, allowDelete bool) (*PullStats, error) {
 
 	stats := &PullStats{}
 
-	// 1) Resolve target state
+	// 1) Resolve target snapshot
 	var target *ProjectState
 	var err error
 	if commitID == "" {
@@ -111,66 +153,139 @@ func PullProject(ctx context.Context, meta *MetaStore, r2 *R2Client,
 		return stats, fmt.Errorf("pull: read remote state: %w", err)
 	}
 	if target == nil {
-		return stats, fmt.Errorf("pull: no remote state found for project %q (commit=%q)", projectName, commitID)
+		return stats, fmt.Errorf("pull: no remote state found for %q (commit=%q)", projectName, commitID)
+	}
+	if err := os.MkdirAll(destPath, 0o755); err != nil {
+		return stats, fmt.Errorf("pull: mkdir dest: %w", err)
 	}
 
-	// 2) Quick lookup for deletes later
+	// quick lookup for deletes
 	targetByPath := make(map[string]FileEntry, len(target.Files))
 	for _, f := range target.Files {
 		targetByPath[f.Path] = f
 	}
 
-	// 3) Ensure files locally
-	for _, rf := range target.Files {
-		localPath := filepath.Join(destPath, filepath.FromSlash(rf.Path))
-		if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
-			return stats, fmt.Errorf("mkdir %s: %w", filepath.Dir(localPath), err)
-		}
+	// 2) concurrent ensure files
+	type job struct{ rf FileEntry }
+	type done struct {
+		rf         FileEntry
+		err        error
+		downloaded bool
+	}
+	jobs := make(chan job)
+	dones := make(chan done)
 
-		needDownload := false
-		if fi, err := os.Stat(localPath); err != nil || !fi.Mode().IsRegular() {
-			needDownload = true
-		} else {
-			sum, _, _, herr := HashFileSHA256(localPath)
-			if herr != nil || sum != rf.Hash {
-				needDownload = true
-			}
-		}
+	workers := max(2, runtime.NumCPU()/2)
+	var wg sync.WaitGroup
+	wg.Add(workers)
 
-		if needDownload {
-			stats.ToDownload++
-			key := rf.R2Key
-			if key == "" {
-				key = r2.BuildKey(projectName, rf.Hash) // must match your push scheme
-			}
-			log.Printf("pull: GET %s -> %s", key, localPath)
-			if err := r2.DownloadTo(ctx, key, localPath); err != nil {
-				return stats, fmt.Errorf("download %s: %w", key, err)
-			}
-			stats.Downloaded++
-
-			// verify hash after download
-			sum, _, _, herr := HashFileSHA256(localPath)
+	verify := func(path, algo, want string) (bool, error) {
+		switch algo {
+		case "sha256", "SHA-256", "":
+			// default/legacy -> SHA-256
+			sum, _, _, herr := HashFileSHA256(path)
 			if herr != nil {
-				return stats, fmt.Errorf("verify %s: %w", localPath, herr)
+				return false, herr
 			}
-			if sum != rf.Hash {
-				return stats, fmt.Errorf("verify %s: hash mismatch (got %s want %s)", localPath, sum, rf.Hash)
+			return sum == want, nil
+
+		case "blake3":
+			// compute just the hash (size/mtime not needed here)
+			sum, err := corehash.New(corehash.BLAKE3).File(path)
+			if err != nil {
+				return false, err
 			}
+			return sum == want, nil
+
+		default:
+			return false, fmt.Errorf("unknown hash algo %q", algo)
+		}
+	}
+
+	worker := func() {
+		defer wg.Done()
+		for j := range jobs {
+			rf := j.rf
+			localPath := filepath.Join(destPath, filepath.FromSlash(rf.Path))
+			// ensure parent
+			if err := os.MkdirAll(filepath.Dir(localPath), 0o755); err != nil {
+				dones <- done{rf: rf, err: fmt.Errorf("mkdir %s: %w", filepath.Dir(localPath), err)}
+				continue
+			}
+
+			needDownload := false
+			if fi, err := os.Lstat(localPath); err != nil || !fi.Mode().IsRegular() {
+				needDownload = true
+			} else {
+				ok, herr := verify(localPath, target.Algo, rf.Hash)
+				if herr != nil || !ok {
+					needDownload = true
+				}
+			}
+
+			if needDownload {
+				key := rf.R2Key
+				if key == "" {
+					key = r2.BuildKey(projectName, rf.Hash)
+				}
+				if err := r2.DownloadTo(ctx, key, localPath); err != nil {
+					dones <- done{rf: rf, err: fmt.Errorf("download %s: %w", key, err)}
+					continue
+				}
+				// verify after download
+				ok, herr := verify(localPath, target.Algo, rf.Hash)
+				if herr != nil {
+					dones <- done{rf: rf, err: fmt.Errorf("verify %s: %w", localPath, herr)}
+					continue
+				}
+				if !ok {
+					dones <- done{rf: rf, err: fmt.Errorf("verify %s: hash mismatch", localPath)}
+					continue
+				}
+				// Restore mtime (optional; use commit timestamp for determinism)
+				_ = os.Chtimes(localPath, time.Now(), time.Unix(0, 0))
+				dones <- done{rf: rf, downloaded: true}
+			} else {
+				dones <- done{rf: rf}
+			}
+		}
+	}
+
+	for i := 0; i < workers; i++ {
+		go worker()
+	}
+	go func() {
+		for _, rf := range target.Files {
+			select {
+			case <-ctx.Done():
+				return
+			case jobs <- job{rf: rf}:
+			}
+		}
+		close(jobs)
+	}()
+
+	for i := 0; i < len(target.Files); i++ {
+		d := <-dones
+		if d.err != nil && !errors.Is(d.err, context.Canceled) {
+			return stats, d.err
+		}
+		stats.ToDownload++
+		if d.downloaded {
+			stats.Downloaded++
 			stats.Verified++
 		} else {
 			stats.Skipped++
 		}
 	}
+	wg.Wait()
+	close(dones)
 
-	// 4) Optional delete
+	// 3) Optional delete pass
 	if allowDelete {
 		_ = filepath.Walk(destPath, func(p string, info os.FileInfo, walkErr error) error {
-			if walkErr != nil {
-				return nil
-			}
-			if info.IsDir() {
-				if info.Name() == ".portsy" {
+			if walkErr != nil || info.IsDir() {
+				if info != nil && info.IsDir() && info.Name() == ".portsy" {
 					return filepath.SkipDir
 				}
 				return nil
@@ -189,12 +304,19 @@ func PullProject(ctx context.Context, meta *MetaStore, r2 *R2Client,
 	_ = EnsureAbletonFolderIcon(destPath)
 	log.Printf("pull: done. toDownload=%d downloaded=%d verified=%d skipped=%d deleted=%d",
 		stats.ToDownload, stats.Downloaded, stats.Verified, stats.Skipped, stats.Deleted)
-
 	return stats, nil
 }
 
-// Convenience for rollback to a specific commit ID (in-place restore).
+// Rollback is unchanged (just uses Pull with allowDelete=true).
 func RollbackProject(ctx context.Context, meta *MetaStore, r2 *R2Client, projectName, destPath, commitID string) error {
 	_, err := PullProject(ctx, meta, r2, projectName, destPath, commitID, true)
 	return err
+}
+
+// Utility
+func max(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

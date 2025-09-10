@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -220,10 +219,4 @@ func lowerASCII(s string) string {
 		b[i] = c
 	}
 	return string(b)
-}
-
-// Streaming copy to tmp writer for large JSON (not necessary now but shows pattern)
-func writeAll(w io.Writer, b []byte) error {
-	_, err := w.Write(b)
-	return err
 }

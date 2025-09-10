@@ -1,6 +1,7 @@
 package main
 
 import (
+	backend "Portsy/backend"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -12,8 +13,6 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-
-	"Portsy/backend" // <-- adjust if your module path differs
 
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -79,8 +78,8 @@ func checkR2(ctx context.Context, r2 *backend.R2Client) error {
 	return nil
 }
 
-// smokePush uploads ALL files to the single R2 keyspace used everywhere,
-// then BeginCommit -> FinalizeCommit with a verify(hash->key) that matches upload.
+// smokePush uploads all files using the SAME key builder as production,
+// then BeginCommit -> FinalizeCommit with verify(hash->key).
 func smokePush(ctx context.Context, meta *backend.MetaStore, r2 *backend.R2Client, projectName, projectPath, message string) {
 	// 1) Build manifest/state
 	st, err := backend.BuildManifest(projectPath)
@@ -89,29 +88,19 @@ func smokePush(ctx context.Context, meta *backend.MetaStore, r2 *backend.R2Clien
 	}
 	log.Printf("manifest: %d file(s)", len(st.Files))
 
-	// 2) Upload/ensure every blob using the SAME key builder used elsewhere
-	up, skip := 0, 0
+	// 2) Idempotent upload/ensure every blob
+	up := 0
 	for i := range st.Files {
 		fe := &st.Files[i]
-		fe.R2Key = backend.BuildR2Key(projectName, fe.Path, fe.Hash)
+		fe.R2Key = r2.BuildKey(projectName, fe.Hash)
 		abs := filepath.Join(projectPath, filepath.FromSlash(fe.Path))
 
-		ok, err := r2.Exists(ctx, fe.R2Key)
-		if err != nil {
-			log.Fatalf("head %s: %v", fe.R2Key, err)
+		if err := r2.UploadIfMissing(ctx, abs, fe.R2Key); err != nil {
+			log.Fatalf("upload %s: %v", fe.R2Key, err)
 		}
-		if !ok {
-			log.Printf("PUT   %s", fe.R2Key)
-			if _, err := r2.UploadFile(ctx, abs, fe.R2Key); err != nil {
-				log.Fatalf("upload %s: %v", fe.R2Key, err)
-			}
-			up++
-		} else {
-			log.Printf("SKIP  %s (exists)", fe.R2Key)
-			skip++
-		}
+		up++
 	}
-	log.Printf("uploaded=%d skipped=%d", up, skip)
+	log.Printf("attempted uploads=%d (idempotent)", up)
 
 	// 3) Begin commit (pending)
 	cm := backend.CommitMeta{
@@ -127,7 +116,7 @@ func smokePush(ctx context.Context, meta *backend.MetaStore, r2 *backend.R2Clien
 
 	// 4) Finalize with verify(hash -> SAME key)
 	verify := func(ctx context.Context, sha string) error {
-		key := backend.BuildR2Key(projectName, "", sha)
+		key := r2.BuildKey(projectName, sha)
 		ok, err := r2.Exists(ctx, key)
 		if err != nil {
 			return err
@@ -147,6 +136,7 @@ func main() {
 	// Load .env with override semantics
 	_ = godotenv.Overload(".env", "../.env", "../../.env")
 
+	// Normalize GOOGLE_APPLICATION_CREDENTIALS to absolute path if relative
 	cred := os.Getenv("GOOGLE_APPLICATION_CREDENTIALS")
 	if strings.HasPrefix(cred, ".") {
 		if abs, err := filepath.Abs(cred); err == nil {
@@ -171,6 +161,7 @@ func main() {
 		commitID    = flag.String("commit", "", "commit ID (rollback or pull specific commit)")
 		force       = flag.Bool("force", false, "allow deleting local files not in target state (pull)")
 		jsonOut     = flag.Bool("json", false, "emit JSON (for scan|pending|diff)")
+		autoPush    = flag.Bool("autopush", false, "if set, push automatically after collect (watch)")
 	)
 	flag.Parse()
 
@@ -276,7 +267,11 @@ func main() {
 			log.Fatal(err)
 		}
 		if ps, err := backend.BuildManifest(projectPath); err == nil {
-			_ = backend.WriteCacheFromState(projectPath, ps)
+			algo := ps.Algo
+			if algo == "" {
+				algo = "sha256"
+			}
+			_ = backend.WriteCacheFromState(projectPath, ps, algo)
 		}
 		log.Println("Push completed ✓")
 
@@ -297,7 +292,11 @@ func main() {
 			log.Fatal(err)
 		}
 		if ps, err := backend.BuildManifest(dst); err == nil {
-			_ = backend.WriteCacheFromState(dst, ps)
+			algo := ps.Algo
+			if algo == "" {
+				algo = "sha256"
+			}
+			_ = backend.WriteCacheFromState(dst, ps, algo)
 		}
 		log.Printf("Pulled %q into %s ✓", *projectName, dst)
 
@@ -322,8 +321,6 @@ func main() {
 	case "watch":
 		rootFlag := flag.Lookup("root")
 		projectFlag := flag.Lookup("project")
-		autoPush := flag.Bool("autopush", false, "if set, push automatically after collect")
-		flag.Parse()
 		if rootFlag == nil || rootFlag.Value.String() == "" {
 			fmt.Println(`usage: -mode=watch -root "<path>" [-project "<name>"] [-autopush]`)
 			return
@@ -358,6 +355,7 @@ func main() {
 			}
 			msg := fmt.Sprintf("autosync: %s", time.Now().Format(time.RFC3339))
 			cmd := exec.Command(exe, "-mode=push", "-root", rootPath, "-project", evt.ProjectName, "-msg", msg)
+			cmd.Env = os.Environ() // inherit creds/env
 			cmd.Stdout = os.Stdout
 			cmd.Stderr = os.Stderr
 			if err := cmd.Run(); err != nil {
@@ -367,8 +365,10 @@ func main() {
 			fmt.Printf("[push] %s success.\n", evt.ProjectName)
 		}
 
-		ctx, cancel := context.WithCancel(context.Background())
+		// base watch context on outer ctx so future cancel hooks work
+		ctx, cancel := context.WithCancel(ctx)
 		defer cancel()
+
 		proj := ""
 		if projectFlag != nil {
 			proj = strings.TrimSpace(projectFlag.Value.String())
