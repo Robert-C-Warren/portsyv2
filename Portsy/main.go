@@ -2,19 +2,18 @@ package main
 
 import (
 	"context"
-	"embed"
 	"log"
-
-	"Portsy/backend/uiapi"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/logger"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+
+	"Portsy/backend/uiapi"
 )
 
-//go:embed all:frontend/dist
-var assets embed.FS
+// dev_assets.go / prod_assets.go will define this:
+var assetServer *assetserver.Options
 
 var (
 	app *App
@@ -23,22 +22,27 @@ var (
 
 func main() {
 	app = NewApp()
-	api = &uiapi.API{} // <-- expose DetectChanges + event/log emitter
+	api = &uiapi.API{} // exposes DetectChanges + event/log emitter
 
 	err := wails.Run(&options.App{
-		Title:  "Portsy",
-		Width:  1024,
-		Height: 768,
-		AssetServer: &assetserver.Options{
-			Assets: assets,
-		},
+		Title:            "Portsy",
+		Width:            1120,
+		Height:           800,
+		AssetServer:      assetServer,
 		BackgroundColour: &options.RGBA{R: 27, G: 38, B: 54, A: 255},
 		OnStartup: func(ctx context.Context) {
-			// hand the Wails ctx to both layers
 			app.Startup(ctx)
 			api.SetContext(ctx)
 		},
-		// bind BOTH so the frontend gets ../wailsjs/go/uiapi/API bindings
+		OnShutdown: func(ctx context.Context) {
+			// allow graceful teardown of watchers, goroutines, etc
+			if closer, ok := interface{}(api).(interface{ Close() error }); ok {
+				_ = closer.Close()
+			}
+			if closer, ok := interface{}(app).(interface{ Shutdown() error }); ok {
+				_ = closer.Shutdown()
+			}
+		},
 		Bind: []interface{}{
 			app,
 			api,

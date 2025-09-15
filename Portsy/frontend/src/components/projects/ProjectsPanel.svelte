@@ -99,13 +99,16 @@
   onMount(load);
 </script>
 
+<!-- === Template === -->
 <div class="panel">
   <div class="spread">
     <h3>Projects</h3>
     <div class="row" style="gap:.5rem; align-items:center;">
+      <!-- Refresh button reloads the remote project list -->
       <button class="btn" type="button" on:click={load} disabled={loading}>
         {loading ? "Loading…" : "Refresh"}
       </button>
+      <!-- Auto-push toggle: bindts to autoPush prop -->
       <label class="row">
         <input
           type="checkbox"
@@ -118,11 +121,13 @@
     </div>
   </div>
 
+  <!-- Error / empty states -->
   {#if error}<p class="label">Error: {error}</p>{/if}
   {#if !loading && !error && projects.length === 0}
     <p class="label">No remote projects yet.</p>
   {/if}
 
+  <!-- Project list -->
   <ul class="list">
     {#each projects as p (p.name)}
       <li class="item">
@@ -144,6 +149,7 @@
     {/each}
   </ul>
 
+  <!-- Commit history for selected project  -->
   {#if selected}
     <div class="muted" style="margin-top:.75rem;">Recent commits for {selected}</div>
     {#if commits.length === 0}
@@ -167,5 +173,6 @@
 </div>
 
 <style>
+  /* Highlight the selected project row */
   .project-row.is-selected { outline: 2px solid currentColor; }
 </style>

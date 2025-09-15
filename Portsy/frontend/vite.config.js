@@ -1,17 +1,28 @@
-import {defineConfig} from 'vite'
-import {svelte} from '@sveltejs/vite-plugin-svelte'
-import { fileURLToPath } from 'node:url';
-import { dirname, resolve } from 'node:path';
+import { defineConfig } from 'vite';
+import { svelte } from '@sveltejs/vite-plugin-svelte';
+import { fileURLToPath, URL } from 'node:url';
 
-const __dirname = dirname(fileURLToPath(import.meta.url));
-
-// https://vitejs.dev/config/
 export default defineConfig({
   plugins: [svelte()],
   resolve: {
     alias: {
-      src: resolve(__dirname, 'src')
+      '@': fileURLToPath(new URL('./src', import.meta.url)),
+      // Shim macOS-only native dep so any accidental import becomes a no-op
+      'fsevents': fileURLToPath(new URL('./src/shims/empty.js', import.meta.url)),
     },
   },
-  server: { port: 5173, strictPort: true }
-})
+  optimizeDeps: {
+    // Don’t even try to prebundle it
+    exclude: ['fsevents'],
+  },
+  build: {
+    rollupOptions: {
+      // And don’t try to bundle it either
+      external: ['fsevents'],
+    },
+  },
+  ssr: {
+    external: ['fsevents'],
+  },
+  server: { port: 5173, strictPort: true },
+});

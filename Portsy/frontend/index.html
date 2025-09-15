@@ -1,15 +1,29 @@
 <!DOCTYPE html>
 <html lang="en">
-	<head>
-		<link rel="preconnect" href="https://fonts.googleapis.com" />
-		<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-		<link href="https://fonts.googleapis.com/css2?family=Mozilla+Headline:wght@200..700&display=swap" rel="stylesheet" />
-		<meta charset="UTF-8" />
-		<meta content="width=device-width, initial-scale=1.0" name="viewport" />
-		<title>Psortsy</title>
-	</head>
-	<body>
-		<div id="app"></div>
-		<script src="./src/main.js" type="module"></script>
-	</body>
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0"
+    />
+    <title>Portsy</title>
+    <meta name="description" content="Portsy — diff-only versioning & sync for Ableton Live projects." />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#111111" />
+
+    <!-- Fonts (swap to a valid family; Inter shown as a safe default) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <!-- If you really want Mozilla Headline, host it locally; Google Fonts likely won't serve it -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300..700&display=swap" rel="stylesheet" />
+
+    <!-- Favicon / app icons (adjust paths to your assets) -->
+    <link rel="icon" href="/favicon.ico" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+  </head>
+  <body>
+    <div id="app"></div>
+    <!-- Vite will handle module loading; keep .js extension -->
+    <script type="module" src="./src/main.js"></script>
+  </body>
 </html>

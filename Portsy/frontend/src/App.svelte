@@ -10,12 +10,12 @@
 	import PullPanel from "./components/pull/PullPanel.svelte";
 	import LogViewer from "./components/LogViewer.svelte";
 
-	import { ScanJSON, PendingJSON, DiffJSON, Push, StartWatcherAll, StopWatcherAll, Pull, GetDiffForProject } from "../wailsjs/go/main/App.js";
+	import { ScanJSON, PendingJSON, Push, StartWatcherAll, StopWatcherAll, GetDiffForProject } from "../wailsjs/go/main/App.js";
 	import { EventsOn } from "../wailsjs/runtime/runtime.js";
 	import { PickRoot, RootStats } from "../wailsjs/go/main/App.js";
 	import { logStore } from "./stores/log";
 	import { diffs, initDiffBus } from "./stores/diff";
-
+	import { stopWatcherAll } from "./lib/api";
 	const TABS = [
 		{ id: "projects", label: "Projects" },
 		{ id: "push", label: "Push" },
@@ -31,13 +31,13 @@
 	let pending = [];
 	let pushing = false;
 	let selectedProject = ""; // chosen by user from dropdown
-	let diff = [];
+	let diff = { changedCount: 0, files: [] };
 	let watching = false;
 	let commitMsg = "";
 	let autoPush = false;
+	let scanToken = 0, pendingToken = 0, diffToken = 0;
 	$: selectedProjectKey = (selectedProject || "").trim().toLowerCase();
 	$: trimmedMsg = (commitMsg || "").trim();
-	$: canPush = !!root && !!selectedProject && trimmedMsg.length > 0 && trimmedMsg.length <= 500;
 
 	async function applyAutoPush(v) {
 		autoPush = v;
@@ -48,6 +48,7 @@
 				watching = true;
 			} catch (e) {
 				watching = false;
+				autoPush = !v;
 				logStore.error(`Watcher restart failed: ${e.message || e}`);
 			}
 		}
@@ -77,6 +78,10 @@
 
 		// stats check elided
 		const wasWatching = watching;
+		if (watching) {
+			try { await stopWatcherAll(); } catch {}
+			watching = false;
+		}
 		root = dir;
 		selectedProject = "";
 		diff = [];
@@ -85,11 +90,6 @@
 
 		await loadProjects();
 		await loadPending();
-
-		if (watching) {
-			await StartWatcherAll();
-			watching = false;
-		}
 
 		if (wasWatching) {
 			await StartWatcherAll(root, autoPush);
@@ -123,7 +123,9 @@
 		if (!root) return;
 		try {
 			show(`Scanning root: ${root}`);
+			const token = ++scanToken;
 			const raw = await safeJSON(await ScanJSON(root), "scan");
+			if (token !== scanToken) return;
 			projects = normalizeProjects(raw);
 		} catch (e) {
 			show(`Scan failed: ${e?.message || e}`);
@@ -134,9 +136,12 @@
 		if (!root) return;
 		try {
 			show(`Pending for: ${root}`);
+			const token = ++pendingToken;
 			const res = await PendingJSON(root);
-			pending = JSON.parse(res);
-			show(res);
+			const data = typeof res === 'string' ? JSON.parse(res) : res;
+			if (token !== pendingToken) return;
+			pending = Array.isArray(data) ? data : [];
+			show(data)
 		} catch (e) {
 			show(`Pending failed: ${e?.message || e}`);
 			console.error("PendingJSON error:", e);
@@ -151,8 +156,16 @@
 
 	async function loadDiff() {
 		if (!root || !selectedProject) return;
-		const res = await GetDiffForProject(selectedProject);
-		diff = JSON.parse(res);
+		try {
+			const token = ++diffToken;
+			const res = await GetDiffForProject(selectedProject)
+			const data = typeof res === 'string' ? JSON.parse(res) : res;
+			if (token !== diffToken) return;
+			diff = data || { changedCount: 0, files: [] };
+		} catch (e) {
+			logStore.warn(`Failed to load diff: ${e?.message || e}`, selectedProject);
+			diff = { changedCount: 0, files: [] };
+		}
 	}
 
 	function projectSliceFromAny(full, name) {
