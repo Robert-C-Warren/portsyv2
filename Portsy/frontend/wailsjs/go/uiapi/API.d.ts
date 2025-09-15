@@ -5,4 +5,8 @@ import {uiapi} from '../models';
 
 export function DetectChanges(arg1:context.Context,arg2:string):Promise<uiapi.DetectChangesResp>;
 
+export function InitMetaStore(arg1:string,arg2:string):Promise<void>;
+
+export function ListRemoteProjects():Promise<Record<string, any>>;
+
 export function SetContext(arg1:context.Context):Promise<void>;

@@ -15,14 +15,6 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/runtime"
 )
 
-// API is the Wails-exposed backend.
-type API struct {
-	ctx context.Context
-}
-
-// Called from your main on startup; keep the ctx.
-func (a *API) SetContext(ctx context.Context) { a.ctx = ctx }
-
 // DetectChangesResp is what the frontend can consume for details.
 type DetectChangesResp struct {
 	Files      []syn.Change           `json:"files"`

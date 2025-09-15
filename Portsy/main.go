@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"embed"
 	"log"
+	"os"
 
 	"github.com/wailsapp/wails/v2"
 	"github.com/wailsapp/wails/v2/pkg/logger"
@@ -13,7 +15,7 @@ import (
 )
 
 // dev_assets.go / prod_assets.go will define this:
-var assetServer *assetserver.Options
+var assets embed.FS
 
 var (
 	app *App
@@ -25,14 +27,22 @@ func main() {
 	api = &uiapi.API{} // exposes DetectChanges + event/log emitter
 
 	err := wails.Run(&options.App{
-		Title:            "Portsy",
-		Width:            1120,
-		Height:           800,
-		AssetServer:      assetServer,
+		Title:  "Portsy",
+		Width:  1120,
+		Height: 800,
+		AssetServer: &assetserver.Options{
+			Assets: assets,
+		},
 		BackgroundColour: &options.RGBA{R: 27, G: 38, B: 54, A: 255},
 		OnStartup: func(ctx context.Context) {
 			app.Startup(ctx)
 			api.SetContext(ctx)
+
+			if err := api.InitMetaStore(
+				os.Getenv("FIREBASE_PROJECT_ID"),
+				os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"),
+			); err != nil {
+			}
 		},
 		OnShutdown: func(ctx context.Context) {
 			// allow graceful teardown of watchers, goroutines, etc

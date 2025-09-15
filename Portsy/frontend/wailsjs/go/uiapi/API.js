@@ -6,6 +6,14 @@ export function DetectChanges(arg1, arg2) {
   return window['go']['uiapi']['API']['DetectChanges'](arg1, arg2);
 }
 
+export function InitMetaStore(arg1, arg2) {
+  return window['go']['uiapi']['API']['InitMetaStore'](arg1, arg2);
+}
+
+export function ListRemoteProjects() {
+  return window['go']['uiapi']['API']['ListRemoteProjects']();
+}
+
 export function SetContext(arg1) {
   return window['go']['uiapi']['API']['SetContext'](arg1);
 }

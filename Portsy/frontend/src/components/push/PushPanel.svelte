@@ -140,10 +140,4 @@
 			{/each}
 		</ul>
 	{/if}
-
-	<!-- Dev-time debug; consider gating behind a flag before release -->
-	<div class="debug" style="margin-top:10px; font-family:monospace; font-size:12px; opacity:0.8;">
-		<div>diff keys: {JSON.stringify(Array.from(_diffMap.keys()))}</div>
-		<div>projectId prop: {projectId}</div>
-	</div>
 </div>
