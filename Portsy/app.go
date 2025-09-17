@@ -21,7 +21,7 @@ import (
 type App struct {
 	ctx         context.Context
 	cliPath     string
-	meta        *backend.MetaStore
+	meta        *MetaStore
 	currentRoot string
 }
 

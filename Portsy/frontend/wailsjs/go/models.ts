@@ -62,6 +62,7 @@ export namespace backend {
 	}
 	
 	export class ProjectDoc {
+	    projectId: string;
 	    name: string;
 	    lastCommitId?: string;
 	    lastCommitAt?: number;
@@ -73,6 +74,7 @@ export namespace backend {
 	
 	    constructor(source: any = {}) {
 	        if ('string' === typeof source) source = JSON.parse(source);
+	        this.projectId = source["projectId"];
 	        this.name = source["name"];
 	        this.lastCommitId = source["lastCommitId"];
 	        this.lastCommitAt = source["lastCommitAt"];

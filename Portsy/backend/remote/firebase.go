@@ -1,9 +1,9 @@
-package backend
+package remote
 
 import (
+	"Portsy/backend/internal/core/model"
 	"context"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -22,6 +22,40 @@ type MetaStore struct {
 type MetaStoreConfig struct {
 	GCPProjectID      string // e.g. "portsy-prod"
 	ServiceAccountKey string // path to service account json (or leave "" to use ADC)
+}
+
+// --- local, remote-only copies to avoid import cycles ---
+type FileEntry struct {
+	Path     string `firestore:"path" json:"path"`
+	Hash     string `firestore:"hash" json:"hash"`
+	Size     int64  `firestore:"size" json:"size"`
+	Modified int64  `firestore:"modified" json:"modified"`
+	R2Key    string `firestore:"r2Key" json:"r2Key"`
+}
+
+type ProjectState struct {
+	ProjectName string      `firestore:"projectName" json:"projectName"`
+	ProjectPath string      `firestore:"projectPath" json:"projectPath"`
+	Files       []FileEntry `firestore:"files"       json:"files"`
+	CreatedAt   int64       `firestore:"createdAt"   json:"createdAt"`
+	Algo        string      `firestore:"algo"        json:"algo,omitempty"`
+}
+
+type CommitMeta struct {
+	ID        string `firestore:"id"        json:"id"`
+	Message   string `firestore:"message"   json:"message"`
+	Timestamp int64  `firestore:"timestamp" json:"timestamp"`
+	UserID    string `firestore:"userId"    json:"userId,omitempty"`
+	ParentID  string `firestore:"parentId"  json:"parentId,omitempty"`
+	Status    string `firestore:"status"    json:"status,omitempty"`
+}
+
+type ProjectDoc struct {
+	ProjectID    string   `firestore:"-"            json:"projectId"`
+	Name         string   `firestore:"name"         json:"name"`
+	LastCommitID string   `firestore:"lastCommitId" json:"lastCommitId,omitempty"`
+	LastCommitAt int64    `firestore:"lastCommitAt" json:"lastCommitAt,omitempty"`
+	Last5        []string `firestore:"last5"        json:"last5,omitempty"`
 }
 
 func NewMetaStore(ctx context.Context, cfg MetaStoreConfig) (*MetaStore, error) {
@@ -118,29 +152,20 @@ func (m *MetaStore) GetLatestState(ctx context.Context, projectName string) (*Pr
 	return &st, &cm, nil
 }
 
-func (m *MetaStore) ListProjects(ctx context.Context) ([]ProjectDoc, error) {
-	iter := m.client.Collection("projects").OrderBy("NameLower", firestore.Asc).Documents(ctx)
-	defer iter.Stop()
-
-	var out []ProjectDoc
-	for {
-		d, err := iter.Next()
-		if err == iterator.Done {
-			break
-		}
-		if err != nil {
-			return nil, fmt.Errorf("list projects: %w", err)
-		}
-		var pd ProjectDoc
-		if err := d.DataTo(&pd); err != nil {
-			return nil, fmt.Errorf("decode project: %w", err)
-		}
-		out = append(out, pd)
+func (m *MetaStore) ListProjects(ctx context.Context) ([]model.ProjectDoc, error) {
+	docs, err := m.client.Collection("projects").Documents(ctx).GetAll()
+	if err != nil {
+		return nil, err
 	}
-	// Client side stable sort as a fallback.
-	sort.Slice(out, func(i, j int) bool {
-		return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name)
-	})
+	out := make([]model.ProjectDoc, 0, len(docs))
+	for _, d := range docs {
+		var p model.ProjectDoc
+		if err := d.DataTo(&p); err != nil {
+			continue
+		}
+		p.ProjectID = d.Ref.ID
+		out = append(out, p)
+	}
 	return out, nil
 }
 

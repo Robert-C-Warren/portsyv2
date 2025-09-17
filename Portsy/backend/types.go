@@ -30,10 +30,11 @@ type CommitMeta struct {
 
 // Firestore document we keep as "latest" pointer
 type ProjectDoc struct {
-	Name         string   `json:"name"`
-	LastCommitID string   `json:"lastCommitId,omitempty"`
-	LastCommitAt int64    `json:"lastCommitAt,omitempty"`
-	Last5        []string `json:"last5,omitempty"`
+	ProjectID    string   `firestore:"-"              json:"projectId"`
+	Name         string   `firestore:"name"           json:"name"`
+	LastCommitID string   `firestore:"lastCommitId"   json:"lastCommitId,omitempty"`
+	LastCommitAt int64    `firestore:"lastCommitAt"   json:"lastCommitAt,omitempty"`
+	Last5        []string `firestore:"last5"          json:"last5,omitempty"`
 }
 
 type Diff struct {

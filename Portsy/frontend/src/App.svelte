@@ -332,7 +332,11 @@
 		<!-- LEFT: controls -->
 		<div class="panel projects-panel">
 			{#if currentTab === "push"}
-				<PushPanel bind:commitMsg {canPush} {pending} {pushing} on:push={(e) => doPush(e.detail.message)} />
+				{#if $selectedProject}
+					<PushPanel bind:commitMsg {canPush} {pending} {pushing} on:push={(e) => doPush(e.detail.message)} projectId={$selectedProject.projectId}/>
+				{:else}
+					<PushPanel bind:commitMsg {canPush} {pending} {pushing} on:push={(e) => doPush(e.detail.message)} />
+				{/if}
 			{/if}
 			{#if currentTab === "pull"}
 				<PullPanel {root} />

@@ -1,22 +1,21 @@
 package uiapi
 
 import (
-	"Portsy/backend"
+	remote "Portsy/backend/remote"
 	"context"
 	"os"
-	"time"
 )
 
 type API struct {
 	ctx       context.Context
-	MetaStore *backend.MetaStore
+	MetaStore *remote.MetaStore
 }
 
 func (a *API) SetContext(ctx context.Context) { a.ctx = ctx }
 
 // Call once on startup
 func (a *API) InitMetaStore(projectId, serviceAccountPath string) error {
-	ms, err := backend.NewMetaStore(a.ctx, backend.MetaStoreConfig{
+	ms, err := remote.NewMetaStore(a.ctx, remote.MetaStoreConfig{
 		GCPProjectID:      projectId,
 		ServiceAccountKey: serviceAccountPath,
 	})
@@ -29,10 +28,10 @@ func (a *API) InitMetaStore(projectId, serviceAccountPath string) error {
 
 // Shape returned to the frontend pull panel
 type RemoteProject struct {
-	Name         string    `json:"name"`
-	LastCommitID string    `json:"lastCommitId"`
-	LastCommitAt int64     `json:"lastCommitAt"`
-	CreatedAt    time.Time `json:"createdAt, omitempty"`
+	ProjectID    string `json:"projectId"`
+	Name         string `json:"name"`
+	LastCommitID string `json:"lastCommitId"`
+	LastCommitAt int64  `json:"lastCommitAt"`
 }
 
 // SHows up as window.go.uiapi.API.ListRemoteProjects()
@@ -52,6 +51,7 @@ func (a *API) ListRemoteProjects() (map[string]any, error) {
 	items := make([]RemoteProject, 0, len(projs))
 	for _, p := range projs {
 		items = append(items, RemoteProject{
+			ProjectID:    p.ProjectID,
 			Name:         p.Name,
 			LastCommitID: p.LastCommitID,
 			LastCommitAt: p.LastCommitAt,

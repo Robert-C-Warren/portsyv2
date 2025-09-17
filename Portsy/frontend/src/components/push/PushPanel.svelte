@@ -11,7 +11,7 @@
 	export let canPush = false; // parent-derived guard (root+project+msg+hasChanges)
 	export let pending = []; // pending changes summary from backend
 	export let pushing = false; // UI spinner/disabled while a push is running
-	export let projectId; // hint to map diffs by id
+	export let projectId = null; // hint to map diffs by id
 
 	const dispatch = createEventDispatcher();
 

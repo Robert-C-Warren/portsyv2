@@ -2,6 +2,7 @@ package backend
 
 import (
 	corehash "Portsy/backend/internal/core/hash"
+	remote "Portsy/backend/remote"
 	"context"
 	"errors"
 	"fmt"
@@ -17,7 +18,7 @@ import (
 // - Concurrency via worker pool
 // - Algo-aware (hash already inside manifest entries)
 // - Key migration prefers server-side copy
-func PushProject(ctx context.Context, meta *MetaStore, r2 *R2Client, project AbletonProject, commit CommitMeta) error {
+func PushProject(ctx context.Context, meta *remote.MetaStore, r2 *R2Client, project AbletonProject, commit CommitMeta) error {
 	// 0) Build manifest (must already include Algo + per-file Hash)
 	cur, err := BuildManifest(project.Path)
 	if err != nil {
@@ -137,7 +138,7 @@ func PushProject(ctx context.Context, meta *MetaStore, r2 *R2Client, project Abl
 // - Algo-aware verification (uses file.Hash + state.Algo)
 // - Atomic download (r2.DownloadTo already writes .part -> fsync -> rename)
 // - Preserves mtime; fsyncs parent dir after rename; bounded concurrency
-func PullProject(ctx context.Context, meta *MetaStore, r2 *R2Client, projectName, destPath, commitID string, allowDelete bool) (*PullStats, error) {
+func PullProject(ctx context.Context, meta *remote.MetaStore, r2 *R2Client, projectName, destPath, commitID string, allowDelete bool) (*PullStats, error) {
 
 	stats := &PullStats{}
 
@@ -308,7 +309,7 @@ func PullProject(ctx context.Context, meta *MetaStore, r2 *R2Client, projectName
 }
 
 // Rollback is unchanged (just uses Pull with allowDelete=true).
-func RollbackProject(ctx context.Context, meta *MetaStore, r2 *R2Client, projectName, destPath, commitID string) error {
+func RollbackProject(ctx context.Context, meta *remote.MetaStore, r2 *R2Client, projectName, destPath, commitID string) error {
 	_, err := PullProject(ctx, meta, r2, projectName, destPath, commitID, true)
 	return err
 }
