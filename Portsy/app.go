@@ -21,7 +21,7 @@ import (
 type App struct {
 	ctx         context.Context
 	cliPath     string
-	meta        *MetaStore
+	meta        backend.MetaStore
 	currentRoot string
 }
 
@@ -98,10 +98,10 @@ func (a *App) Startup(ctx context.Context) {
 		return
 	}
 	metaCfg := backend.MetaStoreConfig{
-		GCPProjectID:      proj,
-		ServiceAccountKey: cred,
+		ProjectID:       proj,
+		CredentialsPath: cred,
 	}
-	m, err := backend.NewMetaStore(ctx, metaCfg)
+	m, err := backend.NewMetaStore(metaCfg)
 	if err != nil {
 		runtime.EventsEmit(a.ctx, "log", fmt.Sprintf("Firestore init error: %v", err))
 		return
@@ -344,7 +344,13 @@ func (a *App) ListRemoteProjects() ([]backend.ProjectDoc, error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return a.meta.ListProjects(ctx)
+	// Only call if the underlying store provides it.
+	if lister, ok := a.meta.(interface {
+		ListProjects(context.Context) ([]backend.ProjectDoc, error)
+	}); ok {
+		return lister.ListProjects(ctx)
+	}
+	return nil, fmt.Errorf("ListProjects not implemented by current MetaStore")
 }
 
 // GetDiffForProject returns a single project's diff in the UI shape:

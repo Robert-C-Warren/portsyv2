@@ -1,7 +1,7 @@
 package main
 
 import (
-	backend "Portsy/backend"
+	backend "Portsy/backend/remote"
 	"bytes"
 	"context"
 	"encoding/json"
